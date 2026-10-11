@@ -52,7 +52,34 @@ npm run dev:web               # http://localhost:3000  (second terminal)
 
 Port 5432 taken? Set DB_PORT in .env and update DATABASE_URL to match.
 
-Try asking *"Can I deploy on Fridays?"* or *"What does the Team plan cost?"*.
+### Try it (no technical knowledge needed)
+
+Once both servers are running, open the web app in your browser (http://localhost:3000). The two sample documents are already loaded, so just type a question into the box at the bottom and press **Ask**. Each answer shows numbered sources underneath, so you can see exactly where it came from.
+
+**About the Engineering Handbook**
+
+1. Can I deploy on Fridays?
+2. How many approvals does a pull request need before merging?
+3. What are the working hours?
+4. How does the on-call rotation work?
+5. How much vacation time do I get?
+
+**About the Cloud FAQ**
+
+6. What does the Team plan cost?
+7. What is the refund policy for annual plans?
+8. How does billing work?
+9. Is my data encrypted?
+10. How do I contact support?
+
+**Edge cases worth trying**
+
+- *"What happens if I deploy a bad release during on-call?"* pulls from more than one section.
+- *"What is the capital of France?"* is not in the documents, so the app should answer "I don't know based on the provided documents."
+
+> In the default offline mode there is no AI model, so the answer is simply the best-matching passage from the documents, not a written reply. Add an OpenAI or Anthropic key (see below) to get fully written answers with citations.
+
+You can also add your own file with **Upload .md / .txt** (or paste text with **Paste text**) and ask questions about it.
 
 ### Use a real LLM
 
