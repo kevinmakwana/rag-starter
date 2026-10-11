@@ -56,7 +56,9 @@ export default function Home() {
     refresh();
   }, [refresh]);
 
-  useEffect(() => bottom.current?.scrollIntoView({ behavior: 'smooth' }), [turns]);
+  useEffect(() => {
+    bottom.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [turns]);
 
   const run = async (label: string, fn: () => Promise<DocumentSummary>) => {
     setBusy(true);
