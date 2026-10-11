@@ -37,7 +37,7 @@ flowchart LR
 
 ## Quick start
 
-Requirements: Node 20+, Docker.
+Requirements: Node 20.19+ (or 22.12+), Docker.
 
 ```bash
 git clone https://github.com/kevinmakwana/rag-starter.git
