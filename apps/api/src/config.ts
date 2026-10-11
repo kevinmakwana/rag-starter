@@ -2,7 +2,7 @@ import { config as loadEnv } from 'dotenv';
 import { resolve } from 'path';
 
 // Load the repo-root .env first, then a local one (local wins only for unset keys).
-loadEnv({ path: resolve(__dirname, '../../../.env') });
+loadEnv({ path: resolve(process.cwd(), '../../.env') });
 loadEnv();
 
 export type EmbeddingProviderName = 'openai' | 'mock';
