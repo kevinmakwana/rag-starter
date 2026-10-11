@@ -17,7 +17,7 @@
     "@nestjs/platform-express": "^12.1.2",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
-    "dotenv": "^16.4.7",
+    "dotenv": "^18.0.6",
     "openai": "^4.85.0",
     "pg": "^8.13.3",
     "reflect-metadata": "^0.2.2",
