@@ -50,6 +50,8 @@ npm run dev:api               # http://localhost:4000
 npm run dev:web               # http://localhost:3000  (second terminal)
 ```
 
+Port 5432 taken? Set DB_PORT in .env and update DATABASE_URL to match.
+
 Try asking *"Can I deploy on Fridays?"* or *"What does the Team plan cost?"*.
 
 ### Use a real LLM

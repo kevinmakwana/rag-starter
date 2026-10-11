@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: rag
       POSTGRES_DB: rag
     ports:
-      - "5432:5432"
+      - "${DB_PORT:-5432}:5432"
     volumes:
       - rag-data:/var/lib/postgresql/data
     healthcheck:
