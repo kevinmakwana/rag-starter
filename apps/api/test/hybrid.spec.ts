@@ -75,15 +75,31 @@ describe('QueryService.retrieve in hybrid mode', () => {
   it('does not touch full-text search in vector mode', async () => {
     const db = fakeDb([row('a', 0.9)], [row('b', 0.8)]);
     const chunks = await service('vector', db).retrieve('question', 5);
-    expect(db.queries).toEqual(['vector']);
+    expect(new Set(db.queries)).toEqual(new Set(['vector'])); // (may repeat as an exact scan when short)
     expect(chunks.map((c) => c.chunkId)).toEqual(['a']);
+  });
+
+  it('breaks full-text ties by chunk id so identical questions always rank the same way', async () => {
+    const sqls: string[] = [];
+    const db = {
+      query: async (sql: string) => {
+        sqls.push(sql);
+        return { rows: [] };
+      },
+    } as any;
+
+    await service('hybrid', db).retrieve('data encrypted', 5);
+
+    const lexical = sqls.find((sql) => /ts_rank_cd/.test(sql))!;
+    // Postgres returns tied rows in physical order, which shifts as rows are rewritten.
+    expect(lexical).toMatch(/ORDER BY ts_rank_cd\([^)]*\)[^)]*\) DESC,\s*c\.id/);
   });
 
   it('surfaces a passage that only full-text search ranked well', async () => {
     const db = fakeDb([row('a', 0.9), row('b', 0.5)], [row('c', 0.4), row('b', 0.5)]);
     const chunks = await service('hybrid', db).retrieve('exact-term-123', 5);
 
-    expect(db.queries.sort()).toEqual(['lexical', 'vector']);
+    expect(new Set(db.queries)).toEqual(new Set(['lexical', 'vector']));
     expect(chunks.map((c) => c.chunkId)).toEqual(['b', 'a', 'c']); // b is in both lists, so it leads
   });
 

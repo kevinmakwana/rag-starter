@@ -71,6 +71,11 @@ describe('evaluate', () => {
     expect(report.hitRate).toBeCloseTo(1 / 3, 5);
   });
 
+  it('lists questions whose answer was found but not ranked first', async () => {
+    const report = await evaluate(retrieve, dataset, 5);
+    expect(report.misranked).toEqual([{ question: 'rank two', retrieved: ['FAQ — Billing', 'FAQ — Support'] }]);
+  });
+
   it('lists the questions that missed, with what was retrieved instead', async () => {
     const report = await evaluate(retrieve, dataset, 5);
     expect(report.failures.map((f) => f.question)).toEqual(['miss', 'wrongly finds something']);

@@ -29,6 +29,8 @@ export interface EvalReport {
   unanswerable: number;
   /** Share of unanswerable questions where retrieval correctly returned nothing. */
   abstainRate: number;
+  /** Answerable questions where a relevant chunk was retrieved, but not first. */
+  misranked: EvalFailure[];
   failures: EvalFailure[];
 }
 
@@ -56,6 +58,7 @@ export async function evaluate(
   const ranks: number[] = [];
   const abstains: number[] = [];
   const failures: EvalFailure[] = [];
+  const misranked: EvalFailure[] = [];
 
   for (const { question, expected } of dataset) {
     const retrieved = (await retrieve(question, k)).slice(0, k);
@@ -68,6 +71,7 @@ export async function evaluate(
     hits.push(rr > 0 ? 1 : 0);
     ranks.push(rr);
     if (rr === 0) failures.push({ question, retrieved: retrieved.map(sourceLabel) });
+    else if (rr < 1) misranked.push({ question, retrieved: retrieved.map(sourceLabel) });
   }
 
   return {
@@ -77,6 +81,7 @@ export async function evaluate(
     mrr: mean(ranks),
     unanswerable: abstains.length,
     abstainRate: mean(abstains),
+    misranked,
     failures,
   };
 }

@@ -6,6 +6,7 @@ loadEnv({ path: resolve(process.cwd(), '../../.env') });
 loadEnv();
 
 export type EmbeddingProviderName = 'openai' | 'mock';
+export type RerankerName = 'none' | 'llm';
 export type SearchMode = 'vector' | 'hybrid';
 export type ChatProviderName = 'openai' | 'anthropic' | 'mock';
 
@@ -22,6 +23,8 @@ export interface AppConfig {
   minScore: number;
   /** `hybrid` fuses vector search with Postgres full-text search; `vector` uses embeddings only. */
   searchMode: SearchMode;
+  /** `llm` reorders the retrieved passages with the chat model (one extra call per question). */
+  reranker: RerankerName;
   /** How many previous chat messages are used to resolve follow-up questions (0 disables memory). */
   historyMessages: number;
   openai: { apiKey?: string; embeddingModel: string; chatModel: string };
@@ -57,6 +60,7 @@ export function loadConfig(): AppConfig {
     topK: int('TOP_K', 5),
     minScore: 0,
     searchMode: oneOf('SEARCH_MODE', ['vector', 'hybrid'] as const, 'hybrid'),
+    reranker: oneOf('RERANKER', ['none', 'llm'] as const, 'none'),
     historyMessages: int('HISTORY_MESSAGES', 6),
     openai: {
       apiKey: process.env.OPENAI_API_KEY || undefined,

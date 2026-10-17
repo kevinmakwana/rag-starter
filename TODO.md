@@ -13,7 +13,7 @@ Verified: unit tests, SSE controller tests, typecheck, build, and the e2e suite 
 
 - [x] **Eval set first.** Questions with expected sources and a script reporting hit rate and MRR; guarded in the test suite.
 - [x] **Hybrid search.** `tsvector` + GIN, fused with reciprocal rank fusion; compared against the eval baseline.
-- [ ] **Re-ranking (optional).** Pluggable `Reranker` interface that runs after retrieval.
-- [ ] **Check filtered HNSW search.** Reproduce a `documentIds` filter returning fewer than `topK` rows and fix it if so.
+- [x] **Re-ranking (optional).** Pluggable `Reranker` interface that runs after retrieval.
+- [x] **Check filtered HNSW search.** Reproduced: a `documentIds` filter (and, separately, deleted-but-unvacuumed entries) made HNSW return too few or zero rows. Fixed with an exact-scan fallback when the index comes back short. pgvector's iterative scans did not fix the deleted-entries case.
 - [ ] **Improve the chunker.** Heading path, tables and lists kept intact, document title in the embedded text, token-based sizing.
 - [ ] **Loosen citation parsing.** Accept `[1, 2]` and ranges, flag answers with no valid citation.

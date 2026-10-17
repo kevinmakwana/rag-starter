@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { APP_CONFIG, AppConfig } from '../config';
 import { DatabaseService, toVector } from '../database/database.service';
 import { CHAT_PROVIDER, ChatProvider, EMBEDDING_PROVIDER, EmbeddingProvider } from '../providers/types';
@@ -11,6 +11,7 @@ import {
   sourceLabel,
   trimHistory,
 } from './prompt';
+import { NoopReranker, RERANKER, Reranker } from './reranker';
 import { reciprocalRankFusion, toOrTsQuery } from './search';
 
 export interface Source {
@@ -53,9 +54,19 @@ export class QueryService {
     @Inject(EMBEDDING_PROVIDER) private readonly embeddings: EmbeddingProvider,
     @Inject(CHAT_PROVIDER) private readonly chat: ChatProvider,
     @Inject(DatabaseService) private readonly db: DatabaseService,
+    @Optional() @Inject(RERANKER) private readonly reranker: Reranker = new NoopReranker(),
   ) {}
 
-  /** Nearest chunks by cosine similarity. */
+  /**
+   * Nearest chunks by cosine similarity, via the HNSW index.
+   *
+   * An HNSW scan is approximate and stops after its ef_search candidates *before* the WHERE clause and
+   * row visibility apply. Entries of deleted chunks linger in the index until VACUUM, and a document
+   * filter discards candidates too, so the scan can come back short or even empty while matching rows
+   * exist (iterative scans don't help with the deleted entries). When fewer rows than requested come
+   * back we re-run as an exact scan: `+ 0` stops Postgres from using the index for ordering, yet a
+   * document filter still uses its own btree. That is cheap at starter scale and makes search correct.
+   */
   private async vectorSearch(vector: string, limit: number, documentIds?: string[]): Promise<RetrievedChunk[]> {
     const params: unknown[] = [vector, limit];
     let filter = '';
@@ -63,21 +74,27 @@ export class QueryService {
       params.push(documentIds);
       filter = 'WHERE c.document_id = ANY($3::uuid[])';
     }
-    const { rows } = await this.db.query<RetrievedChunk>(
-      `SELECT c.id::text            AS "chunkId",
-              c.document_id         AS "documentId",
-              d.title,
-              c.heading,
-              c.content,
-              1 - (c.embedding <=> $1::vector) AS score
-         FROM chunks c
-         JOIN documents d ON d.id = c.document_id
-         ${filter}
-        ORDER BY c.embedding <=> $1::vector
-        LIMIT $2`,
-      params,
-    );
-    return rows.map((r) => ({ ...r, score: Number(r.score) }));
+    const run = async (orderBy: string): Promise<RetrievedChunk[]> => {
+      const { rows } = await this.db.query<RetrievedChunk>(
+        `SELECT c.id::text            AS "chunkId",
+                c.document_id         AS "documentId",
+                d.title,
+                c.heading,
+                c.content,
+                1 - (c.embedding <=> $1::vector) AS score
+           FROM chunks c
+           JOIN documents d ON d.id = c.document_id
+           ${filter}
+          ORDER BY ${orderBy}
+          LIMIT $2`,
+        params,
+      );
+      return rows.map((r) => ({ ...r, score: Number(r.score) }));
+    };
+
+    const approximate = await run('c.embedding <=> $1::vector');
+    if (approximate.length >= limit) return approximate;
+    return run('(c.embedding <=> $1::vector) + 0');
   }
 
   /** Chunks containing any word of the question, best full-text match first. Scores are still cosine. */
@@ -106,7 +123,7 @@ export class QueryService {
          JOIN documents d ON d.id = c.document_id
         WHERE c.fts @@ to_tsquery('english', $3)
           ${filter}
-        ORDER BY ts_rank_cd(c.fts, to_tsquery('english', $3)) DESC
+        ORDER BY ts_rank_cd(c.fts, to_tsquery('english', $3)) DESC, c.id
         LIMIT $2`,
       params,
     );
@@ -123,18 +140,21 @@ export class QueryService {
     const [embedding] = await this.embeddings.embed([question]);
     const vector = toVector(embedding);
 
+    // A reranker needs more candidates than we will finally keep.
+    const pool = topK * this.reranker.candidateMultiplier;
     let ranked: RetrievedChunk[];
     if (this.cfg.searchMode === 'hybrid') {
-      const candidates = Math.max(topK * 4, 20);
+      const fetchLimit = Math.max(pool * 4, 20);
       const [semantic, lexical] = await Promise.all([
-        this.vectorSearch(vector, candidates, documentIds),
-        this.lexicalSearch(vector, question, candidates, documentIds),
+        this.vectorSearch(vector, fetchLimit, documentIds),
+        this.lexicalSearch(vector, question, fetchLimit, documentIds),
       ]);
       ranked = reciprocalRankFusion([semantic, lexical]).map((f) => f.item);
     } else {
-      ranked = await this.vectorSearch(vector, topK, documentIds);
+      ranked = await this.vectorSearch(vector, pool, documentIds);
     }
-    return ranked.filter((r) => r.score >= this.cfg.minScore).slice(0, topK);
+    const candidates = ranked.filter((r) => r.score >= this.cfg.minScore).slice(0, pool);
+    return (await this.reranker.rerank(question, candidates)).slice(0, topK);
   }
 
   private toSources(chunks: RetrievedChunk[], answer = ''): Source[] {

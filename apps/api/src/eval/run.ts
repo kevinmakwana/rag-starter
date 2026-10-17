@@ -43,6 +43,7 @@ async function main() {
     console.log(`  hit@1    ${pct(report.top1Rate)}`);
     console.log(`  MRR      ${report.mrr.toFixed(3)}`);
     console.log(`  abstain  ${pct(report.abstainRate)}  (${report.unanswerable} unanswerable questions)`);
+    for (const f of report.misranked) console.log(`  ~ ${f.question}\n      got: ${f.retrieved.join(' | ')}`);
     for (const f of report.failures) console.log(`  ✗ ${f.question}\n      got: ${f.retrieved.join(' | ') || '(nothing)'}`);
 
     const minHit = arg('min-hit');
