@@ -19,6 +19,8 @@ export interface AppConfig {
   chunkOverlap: number;
   topK: number;
   minScore: number;
+  /** How many previous chat messages are used to resolve follow-up questions (0 disables memory). */
+  historyMessages: number;
   openai: { apiKey?: string; embeddingModel: string; chatModel: string };
   anthropic: { apiKey?: string; chatModel: string };
 }
@@ -51,6 +53,7 @@ export function loadConfig(): AppConfig {
     chunkOverlap: int('CHUNK_OVERLAP', 120),
     topK: int('TOP_K', 5),
     minScore: 0,
+    historyMessages: int('HISTORY_MESSAGES', 6),
     openai: {
       apiKey: process.env.OPENAI_API_KEY || undefined,
       embeddingModel: process.env.OPENAI_EMBEDDING_MODEL ?? 'text-embedding-3-small',
@@ -66,6 +69,7 @@ export function loadConfig(): AppConfig {
   const rawMin = process.env.MIN_SCORE;
   cfg.minScore = rawMin ? Number(rawMin) : cfg.embeddingProvider === 'mock' ? 0.05 : 0.2;
 
+  if (cfg.historyMessages < 0) throw new Error('HISTORY_MESSAGES must be 0 or more');
   if (cfg.chunkOverlap >= cfg.chunkSize) {
     throw new Error('CHUNK_OVERLAP must be smaller than CHUNK_SIZE');
   }

@@ -26,6 +26,8 @@ export interface DocumentSummary {
   charCount: number;
   chunkCount: number;
   createdAt: string;
+  /** True when identical content was already indexed and the existing document is returned. */
+  duplicate: boolean;
 }
 
 /** Use the first Markdown H1 as the title, falling back to the file name. */

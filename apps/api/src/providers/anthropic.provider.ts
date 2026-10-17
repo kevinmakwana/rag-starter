@@ -9,8 +9,8 @@ export class AnthropicChatProvider implements ChatProvider {
     private readonly model: string,
   ) {}
 
-  async complete(messages: ChatMessage[]): Promise<string> {
-    // Anthropic takes the system prompt as a separate field.
+  /** Anthropic takes the system prompt as a separate field. */
+  private toRequest(messages: ChatMessage[]) {
     const system = messages
       .filter((m) => m.role === 'system')
       .map((m) => m.content)
@@ -18,14 +18,20 @@ export class AnthropicChatProvider implements ChatProvider {
     const turns = messages
       .filter((m) => m.role !== 'system')
       .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }));
+    return { model: this.model, max_tokens: 1024, temperature: 0.1, system, messages: turns };
+  }
 
-    const res = await this.client.messages.create({
-      model: this.model,
-      max_tokens: 1024,
-      temperature: 0.1,
-      system,
-      messages: turns,
-    });
+  async *stream(messages: ChatMessage[], signal?: AbortSignal): AsyncGenerator<string> {
+    const stream = this.client.messages.stream(this.toRequest(messages), { signal });
+    for await (const event of stream) {
+      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+        yield event.delta.text;
+      }
+    }
+  }
+
+  async complete(messages: ChatMessage[]): Promise<string> {
+    const res = await this.client.messages.create(this.toRequest(messages));
     return res.content
       .filter((block): block is Anthropic.TextBlock => block.type === 'text')
       .map((block) => block.text)

@@ -7,7 +7,10 @@ import { AppModule } from './app.module';
 import { titleFrom } from './documents/documents.dto';
 import { DocumentsService } from './documents/documents.service';
 
-/** Index every .md/.txt file in /samples (skips titles that already exist). */
+/**
+ * Index every .md/.txt file in /samples. Skips content that is already indexed, and titles that
+ * already exist (documents indexed before content hashes were stored have no hash to compare).
+ */
 async function seed() {
   const app = await NestFactory.createApplicationContext(AppModule, { logger: ['error', 'warn', 'log'] });
   const documents = app.get(DocumentsService);
@@ -23,7 +26,8 @@ async function seed() {
       Logger.log(`Skipping "${title}" (already indexed)`, 'Seed');
       continue;
     }
-    await documents.create({ title, content, source: `samples/${file}` });
+    const doc = await documents.create({ title, content, source: `samples/${file}` });
+    if (doc.duplicate) Logger.log(`Skipping "${title}" (identical content already indexed)`, 'Seed');
   }
   await app.close();
 }
