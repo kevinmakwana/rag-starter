@@ -33,7 +33,7 @@ flowchart LR
 
 **Ingest:** text → structure-aware chunks (split on Markdown sections, ~800 chars, 120-char overlap, code fences respected) → embeddings (section heading included) → one transaction into `documents` + `chunks`.
 
-**Query:** embed the question → top-k nearest chunks by cosine similarity (optionally filtered to selected documents) → drop low-score chunks → prompt with numbered passages → return the answer plus sources, scores and which ones were cited.
+**Query:** embed the question → candidates from vector search (cosine) and Postgres full-text search, merged with reciprocal rank fusion (`SEARCH_MODE=hybrid`, the default; optionally filtered to selected documents) → drop low-score chunks → prompt with numbered passages → return the answer plus sources, scores and which ones were cited.
 
 ## Quick start
 
@@ -160,7 +160,11 @@ samples/                  fictional docs to try it with
 
 ## Configuration
 
-All settings live in the root `.env` (see [`.env.example`](.env.example)): providers and models, `EMBEDDING_DIM`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `TOP_K`, `MIN_SCORE`, `HISTORY_MESSAGES`, ports and CORS.
+All settings live in the root `.env` (see [`.env.example`](.env.example)): providers and models, `EMBEDDING_DIM`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `TOP_K`, `MIN_SCORE`, `SEARCH_MODE`, `HISTORY_MESSAGES`, ports and CORS.
+
+## Measuring retrieval
+
+`eval/dataset.json` holds questions labelled with the section that answers them (and a few the documents can't answer). `npm run eval` reports hit@k, hit@1, MRR and how often unanswerable questions correctly retrieve nothing, against whatever providers `.env` selects. Run it with `SEARCH_MODE=vector` and `SEARCH_MODE=hybrid` to compare, and with a real embedding provider before trusting the numbers: the offline mock is word-based, so it flatters lexical search. The e2e suite fails if mock-mode quality drops below the recorded baseline.
 
 ## Testing
 
@@ -174,8 +178,7 @@ The e2e suite boots the real Nest app against pgvector with the mock providers, 
 ## Ideas for next steps
 
 - PDF and DOCX ingestion
-- Hybrid search (pgvector + Postgres full-text) with reciprocal rank fusion
-- Re-ranking, and an eval set to measure retrieval quality
+- Re-ranking
 - Auth and per-user document scoping
 
 ## License

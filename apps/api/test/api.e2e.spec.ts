@@ -5,7 +5,11 @@
 import 'reflect-metadata';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { readdir, readFile } from 'fs/promises';
 import { AddressInfo } from 'net';
+import { join, resolve } from 'path';
+import { evaluate } from '../src/eval/evaluate';
+import { QueryService } from '../src/query/query.service';
 
 const DB = process.env.E2E_DATABASE_URL;
 const readJson = async (res: Response): Promise<any> => res.json();
@@ -162,5 +166,29 @@ describeIfDb('API (e2e)', () => {
   it('rejects invalid input', async () => {
     expect((await post('/query', { question: '' })).status).toBe(400);
     expect((await post('/documents', { title: 'x' })).status).toBe(400);
+  });
+
+  // Guards retrieval quality on the sample docs (offline mock embeddings, so the bar is modest).
+  // Baselines on the 24-question set: vector hit@1 95.2% / MRR 0.976; hybrid (default) hit@1 100% / MRR 1.0;
+  // abstain 33% for both (mock hash collisions).
+  // Raise these when retrieval improves; if a change makes them fail, it made search worse.
+  it('keeps retrieval quality on the eval set above the baseline', async () => {
+    const samples = resolve(process.cwd(), '../../samples');
+    const ids: string[] = [];
+    for (const file of (await readdir(samples)).filter((f) => f.endsWith('.md'))) {
+      const content = await readFile(join(samples, file), 'utf8');
+      const title = content.match(/^#\s+(.+)$/m)![1];
+      ids.push((await readJson(await post('/documents', { title, content }))).id);
+    }
+    const dataset = JSON.parse(await readFile(resolve(process.cwd(), 'eval/dataset.json'), 'utf8'));
+    const query = app.get(QueryService);
+
+    const report = await evaluate((question, k) => query.retrieve(question, k), dataset, 5);
+
+    await Promise.all(ids.map((id) => fetch(`${base}/documents/${id}`, { method: 'DELETE' })));
+    expect(report.hitRate).toBeGreaterThanOrEqual(0.95);
+    expect(report.top1Rate).toBeGreaterThanOrEqual(0.95);
+    expect(report.mrr).toBeGreaterThanOrEqual(0.98);
+    expect(report.abstainRate).toBeGreaterThanOrEqual(0.3);
   });
 });

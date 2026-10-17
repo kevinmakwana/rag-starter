@@ -70,6 +70,11 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         embedding   vector(${dim}) NOT NULL
       )`);
     await this.query('CREATE INDEX IF NOT EXISTS chunks_document_idx ON chunks(document_id)');
+    // Full-text side of hybrid search. Generated, so it stays in sync with heading/content for free.
+    await this.query(`
+      ALTER TABLE chunks ADD COLUMN IF NOT EXISTS fts tsvector
+        GENERATED ALWAYS AS (to_tsvector('english', coalesce(heading, '') || ' ' || content)) STORED`);
+    await this.query('CREATE INDEX IF NOT EXISTS chunks_fts_idx ON chunks USING gin (fts)');
     // HNSW supports up to 2000 dimensions; above that, fall back to exact search.
     if (dim <= 2000) {
       await this.query(

@@ -11,6 +11,7 @@ import {
   sourceLabel,
   trimHistory,
 } from './prompt';
+import { reciprocalRankFusion, toOrTsQuery } from './search';
 
 export interface Source {
   n: number;
@@ -54,12 +55,14 @@ export class QueryService {
     @Inject(DatabaseService) private readonly db: DatabaseService,
   ) {}
 
-  async retrieve(question: string, topK: number, documentIds?: string[]): Promise<RetrievedChunk[]> {
-    const [vector] = await this.embeddings.embed([question]);
-    const filter = documentIds?.length ? 'WHERE c.document_id = ANY($3::uuid[])' : '';
-    const params: unknown[] = [toVector(vector), topK];
-    if (filter) params.push(documentIds);
-
+  /** Nearest chunks by cosine similarity. */
+  private async vectorSearch(vector: string, limit: number, documentIds?: string[]): Promise<RetrievedChunk[]> {
+    const params: unknown[] = [vector, limit];
+    let filter = '';
+    if (documentIds?.length) {
+      params.push(documentIds);
+      filter = 'WHERE c.document_id = ANY($3::uuid[])';
+    }
     const { rows } = await this.db.query<RetrievedChunk>(
       `SELECT c.id::text            AS "chunkId",
               c.document_id         AS "documentId",
@@ -74,9 +77,64 @@ export class QueryService {
         LIMIT $2`,
       params,
     );
-    return rows
-      .map((r) => ({ ...r, score: Number(r.score) }))
-      .filter((r) => r.score >= this.cfg.minScore);
+    return rows.map((r) => ({ ...r, score: Number(r.score) }));
+  }
+
+  /** Chunks containing any word of the question, best full-text match first. Scores are still cosine. */
+  private async lexicalSearch(
+    vector: string,
+    question: string,
+    limit: number,
+    documentIds?: string[],
+  ): Promise<RetrievedChunk[]> {
+    const tsquery = toOrTsQuery(question);
+    if (!tsquery) return [];
+    const params: unknown[] = [vector, limit, tsquery];
+    let filter = '';
+    if (documentIds?.length) {
+      params.push(documentIds);
+      filter = 'AND c.document_id = ANY($4::uuid[])';
+    }
+    const { rows } = await this.db.query<RetrievedChunk>(
+      `SELECT c.id::text            AS "chunkId",
+              c.document_id         AS "documentId",
+              d.title,
+              c.heading,
+              c.content,
+              1 - (c.embedding <=> $1::vector) AS score
+         FROM chunks c
+         JOIN documents d ON d.id = c.document_id
+        WHERE c.fts @@ to_tsquery('english', $3)
+          ${filter}
+        ORDER BY ts_rank_cd(c.fts, to_tsquery('english', $3)) DESC
+        LIMIT $2`,
+      params,
+    );
+    return rows.map((r) => ({ ...r, score: Number(r.score) }));
+  }
+
+  /**
+   * Top `topK` chunks for a question. In hybrid mode the vector and full-text candidate lists are
+   * merged with reciprocal rank fusion, which rescues exact terms (names, codes, numbers) that
+   * embeddings blur. Either way chunks below MIN_SCORE (cosine) are dropped afterwards, so
+   * a question the documents can't answer still retrieves nothing.
+   */
+  async retrieve(question: string, topK: number, documentIds?: string[]): Promise<RetrievedChunk[]> {
+    const [embedding] = await this.embeddings.embed([question]);
+    const vector = toVector(embedding);
+
+    let ranked: RetrievedChunk[];
+    if (this.cfg.searchMode === 'hybrid') {
+      const candidates = Math.max(topK * 4, 20);
+      const [semantic, lexical] = await Promise.all([
+        this.vectorSearch(vector, candidates, documentIds),
+        this.lexicalSearch(vector, question, candidates, documentIds),
+      ]);
+      ranked = reciprocalRankFusion([semantic, lexical]).map((f) => f.item);
+    } else {
+      ranked = await this.vectorSearch(vector, topK, documentIds);
+    }
+    return ranked.filter((r) => r.score >= this.cfg.minScore).slice(0, topK);
   }
 
   private toSources(chunks: RetrievedChunk[], answer = ''): Source[] {

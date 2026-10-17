@@ -6,6 +6,7 @@ loadEnv({ path: resolve(process.cwd(), '../../.env') });
 loadEnv();
 
 export type EmbeddingProviderName = 'openai' | 'mock';
+export type SearchMode = 'vector' | 'hybrid';
 export type ChatProviderName = 'openai' | 'anthropic' | 'mock';
 
 export interface AppConfig {
@@ -19,6 +20,8 @@ export interface AppConfig {
   chunkOverlap: number;
   topK: number;
   minScore: number;
+  /** `hybrid` fuses vector search with Postgres full-text search; `vector` uses embeddings only. */
+  searchMode: SearchMode;
   /** How many previous chat messages are used to resolve follow-up questions (0 disables memory). */
   historyMessages: number;
   openai: { apiKey?: string; embeddingModel: string; chatModel: string };
@@ -53,6 +56,7 @@ export function loadConfig(): AppConfig {
     chunkOverlap: int('CHUNK_OVERLAP', 120),
     topK: int('TOP_K', 5),
     minScore: 0,
+    searchMode: oneOf('SEARCH_MODE', ['vector', 'hybrid'] as const, 'hybrid'),
     historyMessages: int('HISTORY_MESSAGES', 6),
     openai: {
       apiKey: process.env.OPENAI_API_KEY || undefined,
