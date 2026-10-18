@@ -1,6 +1,8 @@
 import { IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
 
 export const MAX_DOCUMENT_CHARS = 500_000;
+/** Size limit for an uploaded file (a PDF or Word file is bigger than the text inside it). */
+export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 
 export class CreateDocumentDto {
   @IsString()

@@ -12,6 +12,7 @@ import { Client } from 'pg';
 import { APP_CONFIG, AppConfig } from '../src/config';
 import { evaluate } from '../src/eval/evaluate';
 import { QueryService } from '../src/query/query.service';
+import { bullet, makeDocx, makePdf, para } from './helpers/office';
 
 const DB = process.env.E2E_DATABASE_URL;
 const readJson = async (res: Response): Promise<any> => res.json();
@@ -188,6 +189,50 @@ describeIfDb('API (e2e)', () => {
   it('rejects malformed history', async () => {
     const bad = await post('/query', { question: 'hi', history: [{ role: 'system', content: 'x' }] });
     expect(bad.status).toBe(400);
+  });
+
+  const upload = (name: string, bytes: Buffer) => {
+    const form = new FormData();
+    form.append('file', new Blob([bytes]), name);
+    return fetch(`${base}/documents/upload`, { method: 'POST', body: form });
+  };
+
+  it('indexes an uploaded Word document, keeping its headings as sections', async () => {
+    const docx = await makeDocx(
+      [para('Travel policy', 'Heading1'), para('Flights', 'Heading2'), para('Book economy for trips under six hours.'), bullet('Receipts within 30 days')].join(''),
+    );
+
+    const res = await upload('travel.docx', docx);
+
+    expect(res.status).toBe(201);
+    const doc = await readJson(res);
+    expect(doc.title).toBe('Travel policy');
+    const answer = await readJson(await post('/query', { question: 'Which class should I book for short trips?' }));
+    expect(answer.sources[0].label).toBe('Travel policy — Flights');
+    await fetch(`${base}/documents/${doc.id}`, { method: 'DELETE' });
+  });
+
+  it('indexes an uploaded PDF and answers from it', async () => {
+    const pdf = makePdf([['Parking rules', 'Visitors park in bay C and register at reception.']]);
+
+    const res = await upload('rules.pdf', pdf);
+
+    expect(res.status).toBe(201);
+    const doc = await readJson(res);
+    expect(doc.title).toBe('rules');
+    const answer = await readJson(await post('/query', { question: 'Where do visitors park?' }));
+    expect(answer.answer).toContain('bay C');
+    await fetch(`${base}/documents/${doc.id}`, { method: 'DELETE' });
+  });
+
+  it('answers 400 with a useful message for files it cannot read', async () => {
+    const corrupt = await upload('broken.pdf', Buffer.from('definitely not a pdf'));
+    expect(corrupt.status).toBe(400);
+    expect((await readJson(corrupt)).message).toMatch(/PDF/);
+
+    const unsupported = await upload('sheet.xlsx', Buffer.from('x'));
+    expect(unsupported.status).toBe(400);
+    expect((await readJson(unsupported)).message).toMatch(/\.pdf/);
   });
 
   it('rejects invalid stream requests before opening the stream', async () => {

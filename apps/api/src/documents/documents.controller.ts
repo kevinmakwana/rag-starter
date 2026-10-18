@@ -16,10 +16,9 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Response } from 'express';
 import { extname } from 'path';
-import { CreateDocumentDto, DocumentSummary, MAX_DOCUMENT_CHARS, titleFrom } from './documents.dto';
+import { ExtractionError, extractText } from '../ingestion/extractors';
+import { CreateDocumentDto, DocumentSummary, MAX_DOCUMENT_CHARS, MAX_UPLOAD_BYTES, titleFrom } from './documents.dto';
 import { DocumentsService } from './documents.service';
-
-const ALLOWED_EXTENSIONS = new Set(['.md', '.markdown', '.txt']);
 
 /** 201 for a new document, 200 when identical content already existed. */
 function respondCreated(res: Response, doc: DocumentSummary): DocumentSummary {
@@ -45,19 +44,22 @@ export class DocumentsController {
     return respondCreated(res, await this.documents.create(dto));
   }
 
-  /** Index an uploaded .md or .txt file (multipart field name: "file"). */
+  /** Index an uploaded .md, .txt, .pdf or .docx file (multipart field name: "file"). */
   @Post('upload')
-  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 2 * 1024 * 1024 } }))
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES } }))
   async upload(
     @Res({ passthrough: true }) res: Response,
     @UploadedFile() file?: Express.Multer.File,
   ): Promise<DocumentSummary> {
     if (!file) throw new BadRequestException('Attach a file in the "file" field');
     const ext = extname(file.originalname).toLowerCase();
-    if (!ALLOWED_EXTENSIONS.has(ext)) {
-      throw new BadRequestException('Only .md, .markdown and .txt files are supported');
+    let content: string;
+    try {
+      content = await extractText(file.originalname, file.buffer);
+    } catch (err) {
+      if (err instanceof ExtractionError) throw new BadRequestException(err.message);
+      throw err;
     }
-    const content = file.buffer.toString('utf8');
     if (content.length > MAX_DOCUMENT_CHARS) throw new BadRequestException('File is too large');
     const title = titleFrom(content, file.originalname.slice(0, -ext.length) || file.originalname);
     return respondCreated(res, await this.documents.create({ title, content, source: file.originalname }));

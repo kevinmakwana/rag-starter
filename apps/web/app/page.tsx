@@ -185,7 +185,7 @@ export default function Home() {
 
         <div className="actions">
           <button className="btn" disabled={busy} onClick={() => fileInput.current?.click()}>
-            Upload .md / .txt
+            Upload file
           </button>
           <button className="btn ghost" disabled={busy} onClick={() => setPasteOpen((o) => !o)}>
             {pasteOpen ? 'Cancel' : 'Paste text'}
@@ -193,7 +193,7 @@ export default function Home() {
           <input
             ref={fileInput}
             type="file"
-            accept=".md,.markdown,.txt"
+            accept=".md,.markdown,.txt,.pdf,.docx"
             multiple
             hidden
             onChange={(e) => onUpload(e.target.files)}

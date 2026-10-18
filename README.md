@@ -1,6 +1,6 @@
 # RAG Starter
 
-A small, production-minded **retrieval-augmented generation** starter: upload Markdown or text, ask questions, and get answers that **cite the passages they came from**.
+A small, production-minded **retrieval-augmented generation** starter: upload Markdown, text, PDF or Word files, ask questions, and get answers that **cite the passages they came from**.
 
 **NestJS** API · **Next.js** chat UI · **Postgres + pgvector** · pluggable LLM providers (**OpenAI**, **Anthropic**, or an **offline mock** that needs no API key).
 
@@ -79,7 +79,7 @@ Once both servers are running, open the web app in your browser (http://localhos
 
 > In the default offline mode there is no AI model, so the answer is simply the best-matching passage from the documents, not a written reply. Add an OpenAI or Anthropic key (see below) to get fully written answers with citations.
 
-You can also add your own file with **Upload .md / .txt** (or paste text with **Paste text**) and ask questions about it.
+You can also add your own file with **Upload file** (or paste text with **Paste text**) and ask questions about it.
 
 ### Use a real LLM
 
@@ -111,7 +111,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 | `GET` | `/health` | | DB check, active providers and embedding model; `status` is `degraded` if some documents were embedded with a different model |
 | `GET` | `/documents` | | List indexed documents |
 | `POST` | `/documents` | `{ title, content }` | Index pasted text (≤ 500k chars). Identical content is never indexed twice: you get the existing document back (`duplicate: true`, HTTP 200). Returns 409 if the index was built with a different embedding model |
-| `POST` | `/documents/upload` | multipart `file` | `.md`, `.markdown`, `.txt` (≤ 2 MB); first `# H1` becomes the title |
+| `POST` | `/documents/upload` | multipart `file` | `.md`, `.markdown`, `.txt`, `.pdf`, `.docx` (≤ 10 MB); first `# H1` becomes the title, else the file name. Word headings, lists and tables are kept as Markdown; unreadable, password-protected or scanned (no text layer, no OCR) files get a 400 that says why |
 | `DELETE` | `/documents/:id` | | Removes the document and its chunks |
 | `POST` | `/query` | `{ question, topK?, documentIds?, history? }` | Returns `answer`, `sources[]`, `meta` |
 | `POST` | `/query/stream` | same as `/query` | Server-Sent Events: `sources`, then `token`s, then `done` (the full result), or `error` |
@@ -167,6 +167,8 @@ samples/                  fictional docs to try it with
 All settings live in the root `.env` (see [`.env.example`](.env.example)): providers and models, `EMBEDDING_DIM`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `TOP_K`, `MIN_SCORE`, `SEARCH_MODE`, `EXACT_SEARCH_MAX_CHUNKS`, `RERANKER`, `HISTORY_MESSAGES`, ports and CORS.
 
 ## Retrieval details
+
+- **File formats:** `.pdf` goes through `unpdf` (PDF.js) and `.docx` through `mammoth`, whose HTML is converted to Markdown so headings, lists and tables reach the chunker. Extractors are small objects in `ingestion/extractors.ts`, so another format is one more entry. Files are parsed in-process, so only expose uploads to people you trust. `npm audit` lists `sprintf-js` (via `argparse` via `mammoth`) as moderate with no patched release; only mammoth's command-line script loads it, never the library code used here.
 
 - **Re-ranking** (`RERANKER=llm`): retrieval fetches three times as many passages, the chat model orders them in one extra call, and the top `TOP_K` are kept. Off by default; any failure falls back to the retrieval order.
 - **Exact search for small corpora:** HNSW is approximate, and entries of deleted chunks stay in the index until `VACUUM`. In testing, an index full of them returned no live rows at all, and at other times a full page of rows that were not the true nearest (it depends on the random graph, so it showed up on CI but not locally). Up to `EXACT_SEARCH_MAX_CHUNKS` chunks (default 20000, a few tens of milliseconds at most) vector search is therefore exact. Above that it uses the HNSW index and re-runs exactly if the index returns fewer rows than requested, but recall can still dip after large deletes until autovacuum catches up: vacuum regularly and consider raising `hnsw.ef_search` for big corpora.
