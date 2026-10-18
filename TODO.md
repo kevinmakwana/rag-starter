@@ -7,7 +7,14 @@
 - [x] **Record the embedding model per document.** `embedding_model` column; refuse or warn on mismatch with the active provider.
 - [x] **Conversation memory.** Chat history from the UI, follow-up rewriting before retrieval, capped history length.
 
-Verification status: unit tests, the SSE controller tests (stubbed service), typecheck and `npm run build` pass.
-The e2e suite (`api.e2e.spec.ts`, real pgvector) has new tests for streaming, dedupe, health and history that
-have **not been run yet**: Docker could not pull `pgvector/pgvector:pg16` on this machine.
-Run `E2E_DATABASE_URL=postgres://rag:rag@localhost:5433/rag_test npm test` once the database is up.
+Verified: unit tests, SSE controller tests, typecheck, build, and the e2e suite against real pgvector (47 tests).
+
+## Phase 2: retrieval quality
+
+- [x] **Eval set first.** Questions with expected sources and a script reporting hit rate and MRR; guarded in the test suite.
+- [x] **Hybrid search.** `tsvector` + GIN, fused with reciprocal rank fusion; compared against the eval baseline.
+- [x] **Re-ranking (optional).** Pluggable `Reranker` interface that runs after retrieval.
+- [x] **Check filtered HNSW search.** Reproduced: a `documentIds` filter (and, separately, deleted-but-unvacuumed entries) made HNSW return too few or zero rows. Fixed by searching exactly up to `EXACT_SEARCH_MAX_CHUNKS` chunks, with an exact re-run if the index returns fewer rows than asked for above that. pgvector's iterative scans did not fix the deleted-entries case. Found by CI, not locally: dead entries degrade recall randomly, not only by returning short results.
+- [x] **Improve the chunker.** Heading path (a lone document title is dropped from it), tables split between rows with the header repeated, lists split between items, lead-in sentences kept with their list, document title in the embedded text. Documents indexed earlier keep their old chunks until re-indexed.
+- [ ] **Token-based chunk sizing (deferred from the chunker item).** Needs a tokenizer dependency (model-specific), and changing what `CHUNK_SIZE` means would silently break existing configs; characters are a fair proxy for English prose. Revisit for code-heavy or non-English corpora, probably as an opt-in `CHUNK_UNIT`.
+- [x] **Loosen citation parsing.** Accepts `[1, 2]` and ranges (`[1-3]`), flags answers with no valid citation via `meta.citationsMissing`; the UI links list and range citations.

@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { APP_CONFIG, AppConfig } from '../config';
 import { DatabaseService, toVector } from '../database/database.service';
 import { CHAT_PROVIDER, ChatProvider, EMBEDDING_PROVIDER, EmbeddingProvider } from '../providers/types';
@@ -7,10 +7,13 @@ import {
   buildRewriteMessages,
   citedIndexes,
   HistoryMessage,
+  isRefusal,
   RetrievedChunk,
   sourceLabel,
   trimHistory,
 } from './prompt';
+import { NoopReranker, RERANKER, Reranker } from './reranker';
+import { reciprocalRankFusion, toOrTsQuery } from './search';
 
 export interface Source {
   n: number;
@@ -31,6 +34,8 @@ export interface QueryResult {
     chatProvider: string;
     retrieved: number;
     tookMs: number;
+    /** True when passages were retrieved and the model answered, but cited none of them. */
+    citationsMissing?: true;
     /** The standalone question retrieval used, present only when a follow-up was rewritten. */
     rewrittenQuestion?: string;
   };
@@ -52,14 +57,78 @@ export class QueryService {
     @Inject(EMBEDDING_PROVIDER) private readonly embeddings: EmbeddingProvider,
     @Inject(CHAT_PROVIDER) private readonly chat: ChatProvider,
     @Inject(DatabaseService) private readonly db: DatabaseService,
+    @Optional() @Inject(RERANKER) private readonly reranker: Reranker = new NoopReranker(),
   ) {}
 
-  async retrieve(question: string, topK: number, documentIds?: string[]): Promise<RetrievedChunk[]> {
-    const [vector] = await this.embeddings.embed([question]);
-    const filter = documentIds?.length ? 'WHERE c.document_id = ANY($3::uuid[])' : '';
-    const params: unknown[] = [toVector(vector), topK];
-    if (filter) params.push(documentIds);
+  /**
+   * Is the chunk table small enough to search exactly? Uses Postgres' own row estimate (free, and
+   * -1 for a table that has never been analysed, i.e. a small one), so it costs no scan.
+   */
+  private async useExactSearch(): Promise<boolean> {
+    const max = this.cfg.exactSearchMaxChunks ?? 0;
+    if (max <= 0) return false;
+    const { rows } = await this.db.query<{ estimate: string | number }>(
+      "SELECT reltuples::bigint AS estimate FROM pg_class WHERE oid = 'chunks'::regclass",
+    );
+    return !(Number(rows[0]?.estimate) > max);
+  }
 
+  /**
+   * Nearest chunks by cosine similarity.
+   *
+   * HNSW is approximate, and entries of deleted chunks linger in the index until VACUUM. We measured
+   * an index full of them returning no live rows at all, and (by chance of the random graph) other
+   * times a full page of rows that were not the true nearest. A document filter can starve the scan
+   * too. So a table up to EXACT_SEARCH_MAX_CHUNKS is searched exactly (`+ 0` stops Postgres using the
+   * index for ordering, while a document filter still uses its own btree). Above that the index is
+   * used, and if it returns fewer rows than requested the query is re-run exactly.
+   */
+  private async vectorSearch(vector: string, limit: number, documentIds?: string[]): Promise<RetrievedChunk[]> {
+    const params: unknown[] = [vector, limit];
+    let filter = '';
+    if (documentIds?.length) {
+      params.push(documentIds);
+      filter = 'WHERE c.document_id = ANY($3::uuid[])';
+    }
+    const run = async (orderBy: string): Promise<RetrievedChunk[]> => {
+      const { rows } = await this.db.query<RetrievedChunk>(
+        `SELECT c.id::text            AS "chunkId",
+                c.document_id         AS "documentId",
+                d.title,
+                c.heading,
+                c.content,
+                1 - (c.embedding <=> $1::vector) AS score
+           FROM chunks c
+           JOIN documents d ON d.id = c.document_id
+           ${filter}
+          ORDER BY ${orderBy}
+          LIMIT $2`,
+        params,
+      );
+      return rows.map((r) => ({ ...r, score: Number(r.score) }));
+    };
+    const exactOrder = '(c.embedding <=> $1::vector) + 0';
+
+    if (await this.useExactSearch()) return run(exactOrder);
+    const approximate = await run('c.embedding <=> $1::vector');
+    return approximate.length >= limit ? approximate : run(exactOrder);
+  }
+
+  /** Chunks containing any word of the question, best full-text match first. Scores are still cosine. */
+  private async lexicalSearch(
+    vector: string,
+    question: string,
+    limit: number,
+    documentIds?: string[],
+  ): Promise<RetrievedChunk[]> {
+    const tsquery = toOrTsQuery(question);
+    if (!tsquery) return [];
+    const params: unknown[] = [vector, limit, tsquery];
+    let filter = '';
+    if (documentIds?.length) {
+      params.push(documentIds);
+      filter = 'AND c.document_id = ANY($4::uuid[])';
+    }
     const { rows } = await this.db.query<RetrievedChunk>(
       `SELECT c.id::text            AS "chunkId",
               c.document_id         AS "documentId",
@@ -69,14 +138,40 @@ export class QueryService {
               1 - (c.embedding <=> $1::vector) AS score
          FROM chunks c
          JOIN documents d ON d.id = c.document_id
-         ${filter}
-        ORDER BY c.embedding <=> $1::vector
+        WHERE c.fts @@ to_tsquery('english', $3)
+          ${filter}
+        ORDER BY ts_rank_cd(c.fts, to_tsquery('english', $3)) DESC, c.id
         LIMIT $2`,
       params,
     );
-    return rows
-      .map((r) => ({ ...r, score: Number(r.score) }))
-      .filter((r) => r.score >= this.cfg.minScore);
+    return rows.map((r) => ({ ...r, score: Number(r.score) }));
+  }
+
+  /**
+   * Top `topK` chunks for a question. In hybrid mode the vector and full-text candidate lists are
+   * merged with reciprocal rank fusion, which rescues exact terms (names, codes, numbers) that
+   * embeddings blur. Either way chunks below MIN_SCORE (cosine) are dropped afterwards, so
+   * a question the documents can't answer still retrieves nothing.
+   */
+  async retrieve(question: string, topK: number, documentIds?: string[]): Promise<RetrievedChunk[]> {
+    const [embedding] = await this.embeddings.embed([question]);
+    const vector = toVector(embedding);
+
+    // A reranker needs more candidates than we will finally keep.
+    const pool = topK * this.reranker.candidateMultiplier;
+    let ranked: RetrievedChunk[];
+    if (this.cfg.searchMode === 'hybrid') {
+      const fetchLimit = Math.max(pool * 4, 20);
+      const [semantic, lexical] = await Promise.all([
+        this.vectorSearch(vector, fetchLimit, documentIds),
+        this.lexicalSearch(vector, question, fetchLimit, documentIds),
+      ]);
+      ranked = reciprocalRankFusion([semantic, lexical]).map((f) => f.item);
+    } else {
+      ranked = await this.vectorSearch(vector, pool, documentIds);
+    }
+    const candidates = ranked.filter((r) => r.score >= this.cfg.minScore).slice(0, pool);
+    return (await this.reranker.rerank(question, candidates)).slice(0, topK);
   }
 
   private toSources(chunks: RetrievedChunk[], answer = ''): Source[] {
@@ -112,14 +207,17 @@ export class QueryService {
   }
 
   private toResult(answer: string, chunks: RetrievedChunk[], started: number, rewritten?: string): QueryResult {
+    const sources = this.toSources(chunks, answer);
+    const uncited = chunks.length > 0 && !isRefusal(answer) && !sources.some((s) => s.cited);
     return {
       answer,
-      sources: this.toSources(chunks, answer),
+      sources,
       meta: {
         embeddingProvider: this.embeddings.name,
         chatProvider: this.chat.name,
         retrieved: chunks.length,
         tookMs: Date.now() - started,
+        ...(uncited ? { citationsMissing: true as const } : {}),
         ...(rewritten ? { rewrittenQuestion: rewritten } : {}),
       },
     };

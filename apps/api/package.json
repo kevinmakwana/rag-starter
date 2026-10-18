@@ -7,6 +7,7 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/main.js",
     "seed": "ts-node --transpile-only src/seed.ts",
+    "eval": "ts-node --transpile-only src/eval/run.ts",
     "typecheck": "tsc --noEmit",
     "test": "NODE_OPTIONS=--experimental-vm-modules jest"
   },

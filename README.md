@@ -31,9 +31,9 @@ flowchart LR
   A -- "4. answer from numbered passages" --> L[(Chat provider<br/>OpenAI · Anthropic · mock)]
 ```
 
-**Ingest:** text → structure-aware chunks (split on Markdown sections, ~800 chars, 120-char overlap, code fences respected) → embeddings (section heading included) → one transaction into `documents` + `chunks`.
+**Ingest:** text → structure-aware chunks (split on Markdown sections with the full heading path such as `Setup › Install`, ~800 chars, 120-char overlap on prose, code fences respected, tables split between rows with their header repeated, lists split between items, a lead-in sentence kept with its list) → embeddings (document title and section path included) → one transaction into `documents` + `chunks`.
 
-**Query:** embed the question → top-k nearest chunks by cosine similarity (optionally filtered to selected documents) → drop low-score chunks → prompt with numbered passages → return the answer plus sources, scores and which ones were cited.
+**Query:** embed the question → candidates from vector search (cosine) and Postgres full-text search, merged with reciprocal rank fusion (`SEARCH_MODE=hybrid`, the default; optionally filtered to selected documents) → drop low-score chunks → prompt with numbered passages → return the answer plus sources, scores and which ones were cited.
 
 ## Quick start
 
@@ -100,7 +100,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 `EMBEDDING_DIM` must match the embedding model (1536 for `text-embedding-3-small`). If you change it, drop the `chunks` table and re-ingest. The API refuses to start on a mismatch rather than failing at query time.
 
-> Switching from mock to OpenAI embeddings? Re-index: vectors from different models aren't comparable. Each document records the embedding model it was indexed with, so the API logs a warning at startup, reports `degraded` on `/health`, and refuses to add documents (409) while the index mixes models. Documents indexed before this was tracked have no recorded model and are not flagged. The quickest way is `docker compose down -v && npm run db:up && npm run seed`.
+> Switching from mock to OpenAI embeddings? (Also re-index after upgrading to the title-aware chunker if you want older documents to benefit.) Re-index: vectors from different models aren't comparable. Each document records the embedding model it was indexed with, so the API logs a warning at startup, reports `degraded` on `/health`, and refuses to add documents (409) while the index mixes models. Documents indexed before this was tracked have no recorded model and are not flagged. The quickest way is `docker compose down -v && npm run db:up && npm run seed`.
 
 ## API
 
@@ -138,6 +138,8 @@ curl -N localhost:4000/query/stream -H 'content-type: application/json' \
   -d '{"question":"How long are backups kept?"}'
 ```
 
+Citations are read from `[1]`, `[1, 3]` and `[1-3]`. If passages were retrieved but the answer cites none of them, `meta.citationsMissing` is `true` (a plain "I don't know" is not flagged) and the UI says so.
+
 Input is validated with `class-validator` (unknown fields are rejected), and upstream LLM errors come back as a clear `502` instead of an opaque `500`.
 
 ## Project layout
@@ -160,7 +162,16 @@ samples/                  fictional docs to try it with
 
 ## Configuration
 
-All settings live in the root `.env` (see [`.env.example`](.env.example)): providers and models, `EMBEDDING_DIM`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `TOP_K`, `MIN_SCORE`, `HISTORY_MESSAGES`, ports and CORS.
+All settings live in the root `.env` (see [`.env.example`](.env.example)): providers and models, `EMBEDDING_DIM`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `TOP_K`, `MIN_SCORE`, `SEARCH_MODE`, `EXACT_SEARCH_MAX_CHUNKS`, `RERANKER`, `HISTORY_MESSAGES`, ports and CORS.
+
+## Retrieval details
+
+- **Re-ranking** (`RERANKER=llm`): retrieval fetches three times as many passages, the chat model orders them in one extra call, and the top `TOP_K` are kept. Off by default; any failure falls back to the retrieval order.
+- **Exact search for small corpora:** HNSW is approximate, and entries of deleted chunks stay in the index until `VACUUM`. In testing, an index full of them returned no live rows at all, and at other times a full page of rows that were not the true nearest (it depends on the random graph, so it showed up on CI but not locally). Up to `EXACT_SEARCH_MAX_CHUNKS` chunks (default 20000, a few tens of milliseconds at most) vector search is therefore exact. Above that it uses the HNSW index and re-runs exactly if the index returns fewer rows than requested, but recall can still dip after large deletes until autovacuum catches up: vacuum regularly and consider raising `hnsw.ef_search` for big corpora.
+
+## Measuring retrieval
+
+`eval/dataset.json` holds questions labelled with the section that answers them (and a few the documents can't answer). `npm run eval` reports hit@k, hit@1, MRR and how often unanswerable questions correctly retrieve nothing, against whatever providers `.env` selects. Run it with `SEARCH_MODE=vector` and `SEARCH_MODE=hybrid` to compare, and with a real embedding provider before trusting the numbers: the offline mock is word-based, so it flatters lexical search. The e2e suite fails if mock-mode quality drops below the recorded baseline.
 
 ## Testing
 
@@ -174,8 +185,6 @@ The e2e suite boots the real Nest app against pgvector with the mock providers, 
 ## Ideas for next steps
 
 - PDF and DOCX ingestion
-- Hybrid search (pgvector + Postgres full-text) with reciprocal rank fusion
-- Re-ranking, and an eval set to measure retrieval quality
 - Auth and per-user document scoping
 
 ## License

@@ -1,0 +1,203 @@
+[
+  {
+    "question": "What does the Team plan cost?",
+    "expected": [
+      {
+        "title": "Acme Cloud FAQ",
+        "section": "Plans and pricing"
+      }
+    ]
+  },
+  {
+    "question": "How much storage does the free plan include?",
+    "expected": [
+      {
+        "title": "Acme Cloud FAQ",
+        "section": "Plans and pricing"
+      }
+    ]
+  },
+  {
+    "question": "Which plan includes SSO?",
+    "expected": [
+      {
+        "title": "Acme Cloud FAQ",
+        "section": "Plans and pricing"
+      }
+    ]
+  },
+  {
+    "question": "When are invoices issued?",
+    "expected": [
+      {
+        "title": "Acme Cloud FAQ",
+        "section": "Billing"
+      }
+    ]
+  },
+  {
+    "question": "What happens if a payment fails?",
+    "expected": [
+      {
+        "title": "Acme Cloud FAQ",
+        "section": "Billing"
+      }
+    ]
+  },
+  {
+    "question": "Can I get a refund on an annual plan?",
+    "expected": [
+      {
+        "title": "Acme Cloud FAQ",
+        "section": "Refund policy"
+      }
+    ]
+  },
+  {
+    "question": "Is my data encrypted?",
+    "expected": [
+      {
+        "title": "Acme Cloud FAQ",
+        "section": "Data and security"
+      }
+    ]
+  },
+  {
+    "question": "How often are backups taken?",
+    "expected": [
+      {
+        "title": "Acme Cloud FAQ",
+        "section": "Data and security"
+      }
+    ]
+  },
+  {
+    "question": "Where is customer data stored?",
+    "expected": [
+      {
+        "title": "Acme Cloud FAQ",
+        "section": "Data and security"
+      }
+    ]
+  },
+  {
+    "question": "How fast does support respond for urgent Enterprise issues?",
+    "expected": [
+      {
+        "title": "Acme Cloud FAQ",
+        "section": "Support"
+      }
+    ]
+  },
+  {
+    "question": "Can I deploy on Fridays?",
+    "expected": [
+      {
+        "title": "Acme Engineering Handbook",
+        "section": "Deployments"
+      }
+    ]
+  },
+  {
+    "question": "How many approvals does a pull request need?",
+    "expected": [
+      {
+        "title": "Acme Engineering Handbook",
+        "section": "Code review"
+      }
+    ]
+  },
+  {
+    "question": "What are the core working hours?",
+    "expected": [
+      {
+        "title": "Acme Engineering Handbook",
+        "section": "Working hours"
+      }
+    ]
+  },
+  {
+    "question": "How quickly must the on-call engineer respond to a page?",
+    "expected": [
+      {
+        "title": "Acme Engineering Handbook",
+        "section": "On-call"
+      }
+    ]
+  },
+  {
+    "question": "How many days of paid leave do I get?",
+    "expected": [
+      {
+        "title": "Acme Engineering Handbook",
+        "section": "Time off"
+      }
+    ]
+  },
+  {
+    "question": "When does the pipeline roll back automatically?",
+    "expected": [
+      {
+        "title": "Acme Engineering Handbook",
+        "section": "Deployments"
+      }
+    ]
+  },
+  {
+    "question": "How long do I have to write a postmortem?",
+    "expected": [
+      {
+        "title": "Acme Engineering Handbook",
+        "section": "On-call"
+      }
+    ]
+  },
+  {
+    "question": "How far in advance should I request long leave?",
+    "expected": [
+      {
+        "title": "Acme Engineering Handbook",
+        "section": "Time off"
+      }
+    ]
+  },
+  {
+    "question": "Who gets a 99.95% uptime SLA?",
+    "expected": [
+      {
+        "title": "Acme Cloud FAQ",
+        "section": "Plans and pricing"
+      }
+    ]
+  },
+  {
+    "question": "Where is AES-256 used?",
+    "expected": [
+      {
+        "title": "Acme Cloud FAQ",
+        "section": "Data and security"
+      }
+    ]
+  },
+  {
+    "question": "What is the 400 line limit for?",
+    "expected": [
+      {
+        "title": "Acme Engineering Handbook",
+        "section": "Code review"
+      }
+    ]
+  },
+  {
+    "question": "What is the capital of France?",
+    "expected": []
+  },
+  {
+    "question": "Who won the 2018 World Cup?",
+    "expected": []
+  },
+  {
+    "question": "How do I reset my password?",
+    "expected": []
+  }
+]

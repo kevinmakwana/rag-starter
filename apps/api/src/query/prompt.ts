@@ -30,15 +30,24 @@ export function buildMessages(question: string, chunks: RetrievedChunk[]): ChatM
   ];
 }
 
+/** `[1]`, `[1, 3]`, `[1-3]`, `[1-2, 5]`: numbers and ranges separated by commas, nothing else. */
+const CITATION = /\[\s*(\d+(?:\s*[-–]\s*\d+)?(?:\s*,\s*\d+(?:\s*[-–]\s*\d+)?)*)\s*\]/g;
+
 /** Which passage numbers the answer actually cites, in order of first use. */
 export function citedIndexes(answer: string, available: number): number[] {
   const seen = new Set<number>();
-  for (const match of answer.matchAll(/\[(\d+)\]/g)) {
-    const n = Number(match[1]);
-    if (n >= 1 && n <= available) seen.add(n);
+  for (const match of answer.matchAll(CITATION)) {
+    for (const part of match[1].split(',')) {
+      const [from, to = from] = part.split(/[-–]/).map((n) => Number(n.trim()));
+      // Clamp so a silly range like [1-999999999] can't loop for long; reversed ranges cite nothing.
+      for (let n = Math.max(from, 1); n <= Math.min(to, available); n++) seen.add(n);
+    }
   }
   return [...seen];
 }
+
+/** The model declined to answer, which legitimately carries no citation. */
+export const isRefusal = (answer: string): boolean => /^\s*i\s+don'?t\s+know\b/i.test(answer);
 
 /** A previous turn of the conversation, as sent by the client. */
 export interface HistoryMessage {

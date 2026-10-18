@@ -10,7 +10,7 @@ import {
 import { createHash } from 'crypto';
 import { APP_CONFIG, AppConfig } from '../config';
 import { DatabaseService, toVector } from '../database/database.service';
-import { chunkText } from '../ingestion/chunker';
+import { chunkText, embeddingText } from '../ingestion/chunker';
 import { EMBEDDING_PROVIDER, EmbeddingProvider } from '../providers/types';
 import { CreateDocumentDto, DocumentSummary } from './documents.dto';
 
@@ -103,10 +103,9 @@ export class DocumentsService implements OnApplicationBootstrap {
     }
 
     // Embed outside the transaction: it is the slow, failure-prone part.
-    // The heading is prepended so section titles contribute to retrieval.
-    const vectors = await this.embeddings.embed(
-      chunks.map((c) => (c.heading ? `${c.heading}\n\n${c.content}` : c.content)),
-    );
+    // The document title and section path are prepended so they contribute to retrieval.
+    const title = dto.title.trim();
+    const vectors = await this.embeddings.embed(chunks.map((c) => embeddingText(title, c)));
 
     const doc = await this.db.transaction(async (client) => {
       // The unique index on content_hash settles races between concurrent uploads.

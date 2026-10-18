@@ -1,5 +1,5 @@
 import { MockChatProvider, MockEmbeddingProvider } from '../src/providers/mock.provider';
-import { buildMessages, citedIndexes, RetrievedChunk } from '../src/query/prompt';
+import { buildMessages, citedIndexes, isRefusal, RetrievedChunk } from '../src/query/prompt';
 
 const chunk = (title: string, heading: string | null, content: string): RetrievedChunk => ({
   chunkId: '1',
@@ -27,6 +27,38 @@ describe('buildMessages', () => {
 describe('citedIndexes', () => {
   it('returns unique, in-range citations in order of first use', () => {
     expect(citedIndexes('Yes [2]. Also [1][2] and [9].', 3)).toEqual([2, 1]);
+  });
+
+  it('accepts several numbers in one bracket', () => {
+    expect(citedIndexes('Both apply [1, 3].', 3)).toEqual([1, 3]);
+    expect(citedIndexes('Both apply [3,1,2].', 3)).toEqual([3, 1, 2]);
+  });
+
+  it('expands ranges, with a hyphen or an en dash', () => {
+    expect(citedIndexes('See [1-3].', 5)).toEqual([1, 2, 3]);
+    expect(citedIndexes('See [2–4].', 5)).toEqual([2, 3, 4]);
+    expect(citedIndexes('See [1-2, 5].', 5)).toEqual([1, 2, 5]);
+  });
+
+  it('drops out-of-range numbers inside lists and ranges, and clamps huge ranges', () => {
+    expect(citedIndexes('Maybe [1, 9].', 3)).toEqual([1]);
+    expect(citedIndexes('Maybe [2-9].', 3)).toEqual([2, 3]);
+    expect(citedIndexes('Silly [1-999999999].', 3)).toEqual([1, 2, 3]);
+  });
+
+  it('ignores brackets that are not citations', () => {
+    expect(citedIndexes('Use arr[0] or [a] or [1.5] or [] or [3-1] or [1 2].', 5)).toEqual([]);
+  });
+});
+
+describe('isRefusal', () => {
+  it('recognises the standard "I don\'t know" answer', () => {
+    expect(isRefusal("I don't know based on the provided documents.")).toBe(true);
+    expect(isRefusal("  I dont know.")).toBe(true);
+  });
+
+  it('does not flag real answers', () => {
+    expect(isRefusal('Backups are kept for 30 days [1].')).toBe(false);
   });
 });
 
