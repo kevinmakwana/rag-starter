@@ -8,11 +8,15 @@ import { OpenAIChatProvider, OpenAIEmbeddingProvider } from './openai.provider';
 import { LlmReranker, NoopReranker, RERANKER, Reranker } from '../query/reranker';
 import { CHAT_PROVIDER, ChatProvider, EMBEDDING_PROVIDER, EmbeddingProvider } from './types';
 
+/** A key is mandatory in the SDK even for servers that ignore it, so use a placeholder when self-hosting. */
+const openAIClient = (cfg: AppConfig) =>
+  new OpenAI({ apiKey: cfg.openai.apiKey ?? 'not-needed', baseURL: cfg.openai.baseUrl });
+
 export function createEmbeddingProvider(cfg: AppConfig): EmbeddingProvider {
   switch (cfg.embeddingProvider) {
     case 'openai':
       return new OpenAIEmbeddingProvider(
-        new OpenAI({ apiKey: cfg.openai.apiKey }),
+        openAIClient(cfg),
         cfg.openai.embeddingModel,
         cfg.embeddingDim,
       );
@@ -24,11 +28,12 @@ export function createEmbeddingProvider(cfg: AppConfig): EmbeddingProvider {
 export function createChatProvider(cfg: AppConfig): ChatProvider {
   switch (cfg.chatProvider) {
     case 'openai':
-      return new OpenAIChatProvider(new OpenAI({ apiKey: cfg.openai.apiKey }), cfg.openai.chatModel);
+      return new OpenAIChatProvider(openAIClient(cfg), cfg.openai.chatModel);
     case 'anthropic':
       return new AnthropicChatProvider(
         new Anthropic({ apiKey: cfg.anthropic.apiKey }),
         cfg.anthropic.chatModel,
+        cfg.anthropic.maxTokens,
       );
     case 'mock':
       return new MockChatProvider();

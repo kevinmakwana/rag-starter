@@ -118,13 +118,20 @@ export class DocumentsService implements OnApplicationBootstrap {
       );
       if (!rows[0]) return null;
       const documentId = rows[0].id;
-      for (const [i, chunk] of chunks.entries()) {
-        await client.query(
-          `INSERT INTO chunks (document_id, ordinal, heading, content, embedding)
-           VALUES ($1, $2, $3, $4, $5::vector)`,
-          [documentId, chunk.ordinal, chunk.heading, chunk.content, toVector(vectors[i])],
-        );
-      }
+      // One statement for every chunk: parallel arrays unnested into rows. (Also sidesteps the
+      // 65,535 bind-parameter limit that a multi-row VALUES list would hit on big documents.)
+      await client.query(
+        `INSERT INTO chunks (document_id, ordinal, heading, content, embedding)
+         SELECT $1, t.ordinal, t.heading, t.content, t.embedding::vector
+           FROM unnest($2::int[], $3::text[], $4::text[], $5::text[]) AS t(ordinal, heading, content, embedding)`,
+        [
+          documentId,
+          chunks.map((c) => c.ordinal),
+          chunks.map((c) => c.heading),
+          chunks.map((c) => c.content),
+          vectors.map(toVector),
+        ],
+      );
       return rows[0];
     });
 

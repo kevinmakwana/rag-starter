@@ -19,10 +19,20 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
       const res = await this.client.embeddings.create({
         model: this.model,
         input: batch,
-        dimensions: this.dimensions,
+        // Only text-embedding-3 models accept `dimensions`; other servers reject the request outright.
+        ...(/^text-embedding-3/.test(this.model) ? { dimensions: this.dimensions } : {}),
       });
       // The API returns items with an index; sort defensively to keep order.
-      res.data.sort((a, b) => a.index - b.index).forEach((d) => out.push(d.embedding));
+      for (const { embedding } of res.data.sort((a, b) => a.index - b.index)) {
+        if (embedding.length !== this.dimensions) {
+          throw new Error(
+            `Embedding model "${this.model}" returned ${embedding.length}-dimensional vectors but ` +
+              `EMBEDDING_DIM=${this.dimensions}. Set EMBEDDING_DIM to ${embedding.length} (and re-create the ` +
+              'chunks table) or choose a model that matches.',
+          );
+        }
+        out.push(embedding);
+      }
     }
     return out;
   }

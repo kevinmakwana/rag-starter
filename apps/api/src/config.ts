@@ -29,8 +29,9 @@ export interface AppConfig {
   reranker: RerankerName;
   /** How many previous chat messages are used to resolve follow-up questions (0 disables memory). */
   historyMessages: number;
-  openai: { apiKey?: string; embeddingModel: string; chatModel: string };
-  anthropic: { apiKey?: string; chatModel: string };
+  /** `baseUrl` points the OpenAI client at any OpenAI-compatible server (Ollama, vLLM, LM Studio, ...). */
+  openai: { apiKey?: string; baseUrl?: string; embeddingModel: string; chatModel: string };
+  anthropic: { apiKey?: string; chatModel: string; maxTokens: number };
 }
 
 function int(name: string, fallback: number): number {
@@ -67,12 +68,14 @@ export function loadConfig(): AppConfig {
     historyMessages: int('HISTORY_MESSAGES', 6),
     openai: {
       apiKey: process.env.OPENAI_API_KEY || undefined,
+      baseUrl: process.env.OPENAI_BASE_URL || undefined,
       embeddingModel: process.env.OPENAI_EMBEDDING_MODEL ?? 'text-embedding-3-small',
       chatModel: process.env.OPENAI_CHAT_MODEL ?? 'gpt-4o-mini',
     },
     anthropic: {
       apiKey: process.env.ANTHROPIC_API_KEY || undefined,
       chatModel: process.env.ANTHROPIC_CHAT_MODEL ?? 'claude-sonnet-4-5',
+      maxTokens: int('ANTHROPIC_MAX_TOKENS', 1024),
     },
   };
 
@@ -86,8 +89,12 @@ export function loadConfig(): AppConfig {
     throw new Error('CHUNK_OVERLAP must be smaller than CHUNK_SIZE');
   }
   const needsOpenAI = cfg.embeddingProvider === 'openai' || cfg.chatProvider === 'openai';
-  if (needsOpenAI && !cfg.openai.apiKey) {
-    throw new Error('OPENAI_API_KEY is required when an OpenAI provider is selected');
+  // A self-hosted OpenAI-compatible server usually needs no key.
+  if (needsOpenAI && !cfg.openai.apiKey && !cfg.openai.baseUrl) {
+    throw new Error('OPENAI_API_KEY is required when an OpenAI provider is selected (or set OPENAI_BASE_URL)');
+  }
+  if (!Number.isInteger(cfg.anthropic.maxTokens) || cfg.anthropic.maxTokens <= 0) {
+    throw new Error('ANTHROPIC_MAX_TOKENS must be a positive whole number');
   }
   if (cfg.chatProvider === 'anthropic' && !cfg.anthropic.apiKey) {
     throw new Error('ANTHROPIC_API_KEY is required when CHAT_PROVIDER=anthropic');

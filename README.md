@@ -98,6 +98,8 @@ OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
+**Self-hosted or other OpenAI-compatible servers** (Ollama, vLLM, LM Studio): keep `EMBEDDING_PROVIDER`/`CHAT_PROVIDER` on `openai`, set `OPENAI_BASE_URL` (for Ollama `http://localhost:11434/v1`), name your models in `OPENAI_EMBEDDING_MODEL`/`OPENAI_CHAT_MODEL`, and leave the key empty. Set `EMBEDDING_DIM` to the model's size (768 for `nomic-embed-text`); the API checks every returned vector against it and says so if they differ. `dimensions` is only sent to `text-embedding-3` models. `ANTHROPIC_MAX_TOKENS` (default 1024) caps the length of Claude's answers.
+
 `EMBEDDING_DIM` must match the embedding model (1536 for `text-embedding-3-small`). If you change it, drop the `chunks` table and re-ingest. The API refuses to start on a mismatch rather than failing at query time.
 
 > Switching from mock to OpenAI embeddings? (Also re-index after upgrading to the title-aware chunker if you want older documents to benefit.) Re-index: vectors from different models aren't comparable. Each document records the embedding model it was indexed with, so the API logs a warning at startup, reports `degraded` on `/health`, and refuses to add documents (409) while the index mixes models. Documents indexed before this was tracked have no recorded model and are not flagged. The quickest way is `docker compose down -v && npm run db:up && npm run seed`.
