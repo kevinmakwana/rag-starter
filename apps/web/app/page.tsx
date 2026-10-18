@@ -15,18 +15,35 @@ interface Turn {
   error?: string;
 }
 
-/** Render "[1]" style citations as small, clickable markers. */
+/** `[1]`, `[1, 3]`, `[1-3]`: the same citation forms the API understands. */
+const CITATION = /(\[\s*\d+(?:\s*[-–]\s*\d+)?(?:\s*,\s*\d+(?:\s*[-–]\s*\d+)?)*\s*\])/;
+
+/** Passage numbers named by a citation, ranges expanded (capped so a silly range can't flood the page). */
+function citationNumbers(citation: string): number[] {
+  return citation
+    .slice(1, -1)
+    .split(',')
+    .flatMap((part) => {
+      const [from, to = from] = part.split(/[-–]/).map((n) => Number(n.trim()));
+      return Array.from({ length: Math.max(0, Math.min(to - from + 1, 20)) }, (_, i) => from + i);
+    });
+}
+
+/** Render citations as small, clickable markers that jump to the matching source. */
 function Answer({ text, turnId }: { text: string; turnId: number }) {
-  const parts = text.split(/(\[\d+\])/g);
   return (
     <p className="answer">
-      {parts.map((part, i) => {
-        const m = part.match(/^\[(\d+)\]$/);
-        if (!m) return <Fragment key={i}>{part}</Fragment>;
+      {text.split(CITATION).map((part, i) => {
+        // split() with one capture group puts the captured citations at the odd indices.
+        if (i % 2 === 0) return <Fragment key={i}>{part}</Fragment>;
         return (
-          <a key={i} className="cite" href={`#src-${turnId}-${m[1]}`}>
-            {m[1]}
-          </a>
+          <Fragment key={i}>
+            {citationNumbers(part).map((n) => (
+              <a key={n} className="cite" href={`#src-${turnId}-${n}`}>
+                {n}
+              </a>
+            ))}
+          </Fragment>
         );
       })}
     </p>
@@ -266,6 +283,9 @@ export default function Home() {
               {turn.result && (
                 <>
                   <Answer text={turn.result.answer} turnId={turn.id} />
+                  {turn.result.meta.citationsMissing && (
+                    <p className="muted small">This answer cites no sources, so check it against the passages below.</p>
+                  )}
                   {turn.result.meta.rewrittenQuestion && (
                     <p className="muted small">Searched for: “{turn.result.meta.rewrittenQuestion}”</p>
                   )}

@@ -7,6 +7,7 @@ import {
   buildRewriteMessages,
   citedIndexes,
   HistoryMessage,
+  isRefusal,
   RetrievedChunk,
   sourceLabel,
   trimHistory,
@@ -33,6 +34,8 @@ export interface QueryResult {
     chatProvider: string;
     retrieved: number;
     tookMs: number;
+    /** True when passages were retrieved and the model answered, but cited none of them. */
+    citationsMissing?: true;
     /** The standalone question retrieval used, present only when a follow-up was rewritten. */
     rewrittenQuestion?: string;
   };
@@ -190,14 +193,17 @@ export class QueryService {
   }
 
   private toResult(answer: string, chunks: RetrievedChunk[], started: number, rewritten?: string): QueryResult {
+    const sources = this.toSources(chunks, answer);
+    const uncited = chunks.length > 0 && !isRefusal(answer) && !sources.some((s) => s.cited);
     return {
       answer,
-      sources: this.toSources(chunks, answer),
+      sources,
       meta: {
         embeddingProvider: this.embeddings.name,
         chatProvider: this.chat.name,
         retrieved: chunks.length,
         tookMs: Date.now() - started,
+        ...(uncited ? { citationsMissing: true as const } : {}),
         ...(rewritten ? { rewrittenQuestion: rewritten } : {}),
       },
     };

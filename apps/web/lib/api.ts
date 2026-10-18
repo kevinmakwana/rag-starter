@@ -30,6 +30,8 @@ export interface QueryResult {
     chatProvider: string;
     retrieved: number;
     tookMs: number;
+    /** True when the answer cites none of the retrieved passages. */
+    citationsMissing?: boolean;
     /** The standalone question that was searched, when a follow-up was rewritten. */
     rewrittenQuestion?: string;
   };

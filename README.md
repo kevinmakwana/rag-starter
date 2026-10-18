@@ -31,7 +31,7 @@ flowchart LR
   A -- "4. answer from numbered passages" --> L[(Chat provider<br/>OpenAI · Anthropic · mock)]
 ```
 
-**Ingest:** text → structure-aware chunks (split on Markdown sections, ~800 chars, 120-char overlap, code fences respected) → embeddings (section heading included) → one transaction into `documents` + `chunks`.
+**Ingest:** text → structure-aware chunks (split on Markdown sections with the full heading path such as `Setup › Install`, ~800 chars, 120-char overlap on prose, code fences respected, tables split between rows with their header repeated, lists split between items, a lead-in sentence kept with its list) → embeddings (document title and section path included) → one transaction into `documents` + `chunks`.
 
 **Query:** embed the question → candidates from vector search (cosine) and Postgres full-text search, merged with reciprocal rank fusion (`SEARCH_MODE=hybrid`, the default; optionally filtered to selected documents) → drop low-score chunks → prompt with numbered passages → return the answer plus sources, scores and which ones were cited.
 
@@ -100,7 +100,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 `EMBEDDING_DIM` must match the embedding model (1536 for `text-embedding-3-small`). If you change it, drop the `chunks` table and re-ingest. The API refuses to start on a mismatch rather than failing at query time.
 
-> Switching from mock to OpenAI embeddings? Re-index: vectors from different models aren't comparable. Each document records the embedding model it was indexed with, so the API logs a warning at startup, reports `degraded` on `/health`, and refuses to add documents (409) while the index mixes models. Documents indexed before this was tracked have no recorded model and are not flagged. The quickest way is `docker compose down -v && npm run db:up && npm run seed`.
+> Switching from mock to OpenAI embeddings? (Also re-index after upgrading to the title-aware chunker if you want older documents to benefit.) Re-index: vectors from different models aren't comparable. Each document records the embedding model it was indexed with, so the API logs a warning at startup, reports `degraded` on `/health`, and refuses to add documents (409) while the index mixes models. Documents indexed before this was tracked have no recorded model and are not flagged. The quickest way is `docker compose down -v && npm run db:up && npm run seed`.
 
 ## API
 
@@ -137,6 +137,8 @@ Response shape (values illustrative):
 curl -N localhost:4000/query/stream -H 'content-type: application/json' \
   -d '{"question":"How long are backups kept?"}'
 ```
+
+Citations are read from `[1]`, `[1, 3]` and `[1-3]`. If passages were retrieved but the answer cites none of them, `meta.citationsMissing` is `true` (a plain "I don't know" is not flagged) and the UI says so.
 
 Input is validated with `class-validator` (unknown fields are rejected), and upstream LLM errors come back as a clear `502` instead of an opaque `500`.
 

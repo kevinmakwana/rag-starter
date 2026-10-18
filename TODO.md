@@ -15,5 +15,6 @@ Verified: unit tests, SSE controller tests, typecheck, build, and the e2e suite 
 - [x] **Hybrid search.** `tsvector` + GIN, fused with reciprocal rank fusion; compared against the eval baseline.
 - [x] **Re-ranking (optional).** Pluggable `Reranker` interface that runs after retrieval.
 - [x] **Check filtered HNSW search.** Reproduced: a `documentIds` filter (and, separately, deleted-but-unvacuumed entries) made HNSW return too few or zero rows. Fixed with an exact-scan fallback when the index comes back short. pgvector's iterative scans did not fix the deleted-entries case.
-- [ ] **Improve the chunker.** Heading path, tables and lists kept intact, document title in the embedded text, token-based sizing.
-- [ ] **Loosen citation parsing.** Accept `[1, 2]` and ranges, flag answers with no valid citation.
+- [x] **Improve the chunker.** Heading path (a lone document title is dropped from it), tables split between rows with the header repeated, lists split between items, lead-in sentences kept with their list, document title in the embedded text. Documents indexed earlier keep their old chunks until re-indexed.
+- [ ] **Token-based chunk sizing (deferred from the chunker item).** Needs a tokenizer dependency (model-specific), and changing what `CHUNK_SIZE` means would silently break existing configs; characters are a fair proxy for English prose. Revisit for code-heavy or non-English corpora, probably as an opt-in `CHUNK_UNIT`.
+- [x] **Loosen citation parsing.** Accepts `[1, 2]` and ranges (`[1-3]`), flags answers with no valid citation via `meta.citationsMissing`; the UI links list and range citations.
