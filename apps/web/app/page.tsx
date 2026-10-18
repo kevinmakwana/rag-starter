@@ -103,6 +103,27 @@ export default function Home() {
     }
   };
 
+  const onReindexAll = async () => {
+    setBusy(true);
+    setNotice(null);
+    try {
+      const r = await api.reindexAll();
+      const problems = r.skipped.length + r.failed.length;
+      setNotice({
+        kind: problems ? 'error' : 'ok',
+        text:
+          `Re-indexed ${r.reindexed} document(s)` +
+          (problems ? `; ${problems} could not be re-indexed (${[...r.skipped, ...r.failed].map((d) => d.title).join(', ')}): upload those again.` : '.'),
+      });
+      await refresh();
+      api.health().then(setHealth).catch(() => setHealth(null));
+    } catch (err) {
+      setNotice({ kind: 'error', text: (err as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const onUpload = async (files: FileList | null) => {
     for (const file of Array.from(files ?? [])) await run('Indexed', () => api.uploadDocument(file));
     if (fileInput.current) fileInput.current.value = '';
@@ -225,7 +246,10 @@ export default function Home() {
         {health && health.mismatchedDocuments > 0 && (
           <p className="notice error">
             {health.mismatchedDocuments} document(s) were indexed with a different embedding model than the active one
-            ({health.embeddingModel}). Search results will be unreliable until you re-index.
+            ({health.embeddingModel}). Search results will be unreliable until you re-index.{' '}
+            <button className="link" disabled={busy} onClick={onReindexAll}>
+              Re-index all
+            </button>
           </p>
         )}
 

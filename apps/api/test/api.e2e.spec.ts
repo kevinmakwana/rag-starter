@@ -191,6 +191,137 @@ describeIfDb('API (e2e)', () => {
     expect(bad.status).toBe(400);
   });
 
+  describe('updating and re-indexing documents', () => {
+    const put = (id: string, body: unknown) =>
+      fetch(`${base}/documents/${id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const create = async (title: string, content: string) => readJson(await post('/documents', { title, content }));
+    const remove = (id: string) => fetch(`${base}/documents/${id}`, { method: 'DELETE' });
+    const sql = async (statement: string, params: unknown[] = []) => {
+      const client = new Client({ connectionString: DB });
+      await client.connect();
+      try {
+        return await client.query(statement, params);
+      } finally {
+        await client.end();
+      }
+    };
+    const ask = async (question: string) => readJson(await post('/query', { question }));
+
+    it('returns a document with its stored text', async () => {
+      const doc = await create('Notes', '# Notes\n\nThe canteen opens at noon.');
+      const res = await fetch(`${base}/documents/${doc.id}`);
+      expect(res.status).toBe(200);
+      expect(await readJson(res)).toMatchObject({ id: doc.id, title: 'Notes', content: '# Notes\n\nThe canteen opens at noon.' });
+      expect((await fetch(`${base}/documents/00000000-0000-4000-8000-000000000000`)).status).toBe(404);
+      await remove(doc.id);
+    });
+
+    it('replaces the indexed text when the content changes, keeping the document id', async () => {
+      const doc = await create('Policy', '# Policy\n\n## Parking\n\nVisitors park in bay C.');
+      expect((await ask('Where do visitors park?')).answer).toContain('bay C');
+
+      const res = await put(doc.id, { content: '# Policy\n\n## Parking\n\nVisitors park in bay Z.\n\n## Lunch\n\nThe canteen opens at noon.' });
+
+      expect(res.status).toBe(200);
+      const updated = await readJson(res);
+      expect(updated).toMatchObject({ id: doc.id, title: 'Policy', chunkCount: 2, duplicate: false });
+      expect(updated.createdAt).toBe(doc.createdAt);
+      const after = await ask('Where do visitors park?');
+      expect(after.answer).toContain('bay Z');
+      expect(after.answer).not.toContain('bay C');
+      // The old text's hash is free again, so uploading it now creates a new document.
+      const again = await create('Old text', '# Policy\n\n## Parking\n\nVisitors park in bay C.');
+      expect(again.duplicate).toBe(false);
+      await remove(doc.id);
+      await remove(again.id);
+    });
+
+    it('re-embeds when only the title changes, since the title is part of what is embedded', async () => {
+      const doc = await create('Old title', '# Old title\n\n## Parking\n\nVisitors park in bay C.');
+      const res = await put(doc.id, { title: 'New title' });
+      expect(res.status).toBe(200);
+      const result = await ask('Where do visitors park?');
+      expect(result.sources[0].title).toBe('New title');
+      await remove(doc.id);
+    });
+
+    it('refuses an update that would duplicate another document, leaving both untouched', async () => {
+      const a = await create('A', 'Alpha text about the first topic.');
+      const b = await create('B', 'Bravo text about the second topic.');
+
+      const res = await put(b.id, { content: 'Alpha text about the first topic.' });
+
+      expect(res.status).toBe(409);
+      expect((await readJson(res)).message).toContain('"A"');
+      expect((await ask('Bravo second topic')).answer).toContain('Bravo');
+      await remove(a.id);
+      await remove(b.id);
+    });
+
+    it('validates update requests', async () => {
+      const doc = await create('V', 'Some text to validate against.');
+      expect((await put(doc.id, {})).status).toBe(400);
+      expect((await put(doc.id, { title: '' })).status).toBe(400);
+      expect((await put(doc.id, { content: '   ' })).status).toBe(400);
+      expect((await put(doc.id, { nope: 1 })).status).toBe(400);
+      expect((await put('00000000-0000-4000-8000-000000000000', { title: 'x' })).status).toBe(404);
+      expect((await put('not-a-uuid', { title: 'x' })).status).toBe(400);
+      await remove(doc.id);
+    });
+
+    it('re-indexes a document from its stored text with the current chunk settings', async () => {
+      const cfg = app.get<AppConfig>(APP_CONFIG);
+      const sections = Array.from({ length: 6 }, (_, i) => `Sentence number ${i} about parking rules and bays.`).join(' ');
+      const doc = await create('Rules', sections);
+      expect(doc.chunkCount).toBe(1);
+
+      const { chunkSize, chunkOverlap } = cfg;
+      Object.assign(cfg, { chunkSize: 80, chunkOverlap: 10 });
+      try {
+        const res = await fetch(`${base}/documents/${doc.id}/reindex`, { method: 'POST' });
+        expect(res.status).toBe(200);
+        expect((await readJson(res)).chunkCount).toBeGreaterThan(1);
+      } finally {
+        Object.assign(cfg, { chunkSize, chunkOverlap });
+      }
+      await remove(doc.id);
+    });
+
+    it('cannot re-index a document indexed before source text was stored', async () => {
+      const doc = await create('Legacy', 'Text from before content was stored.');
+      await sql('UPDATE documents SET content = NULL WHERE id = $1', [doc.id]);
+
+      const res = await fetch(`${base}/documents/${doc.id}/reindex`, { method: 'POST' });
+
+      expect(res.status).toBe(409);
+      expect((await readJson(res)).message).toMatch(/upload it again|re-upload/i);
+      expect((await put(doc.id, { title: 'Renamed' })).status).toBe(409); // nothing to re-embed from
+      expect((await put(doc.id, { content: 'Fresh text supplied with the update.' })).status).toBe(200);
+      await remove(doc.id);
+    });
+
+    it('repairs a mixed-model index: re-index everything, then indexing works again', async () => {
+      const ok = await create('Current', 'Current model text about parking.');
+      const stale = await create('Stale', 'Stale model text about lunch.');
+      const legacy = await create('Legacy', 'Legacy text about holidays.');
+      await sql("UPDATE documents SET embedding_model = 'openai/text-embedding-3-small/1536' WHERE id = $1", [stale.id]);
+      await sql('UPDATE documents SET content = NULL WHERE id = $1', [legacy.id]);
+      expect((await readJson(await fetch(`${base}/health`))).status).toBe('degraded');
+      expect((await post('/documents', { title: 'Blocked', content: 'Blocked while models are mixed.' })).status).toBe(409);
+
+      const res = await fetch(`${base}/documents/reindex`, { method: 'POST' });
+
+      expect(res.status).toBe(200);
+      const report = await readJson(res);
+      expect(report.reindexed).toBe(2);
+      expect(report.skipped).toEqual([{ id: legacy.id, title: 'Legacy', reason: expect.stringMatching(/stored/i) }]);
+      expect((await readJson(await fetch(`${base}/health`))).mismatchedDocuments).toBe(0);
+      const added = await post('/documents', { title: 'Allowed', content: 'Allowed once the index is consistent.' });
+      expect(added.status).toBe(201);
+      for (const id of [ok.id, stale.id, legacy.id, (await readJson(added)).id]) await remove(id);
+    });
+  });
+
   const upload = (name: string, bytes: Buffer) => {
     const form = new FormData();
     form.append('file', new Blob([bytes]), name);

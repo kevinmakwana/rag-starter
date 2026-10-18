@@ -9,6 +9,7 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Put,
   Res,
   UploadedFile,
   UseInterceptors,
@@ -17,8 +18,16 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { Response } from 'express';
 import { extname } from 'path';
 import { ExtractionError, extractText } from '../ingestion/extractors';
-import { CreateDocumentDto, DocumentSummary, MAX_DOCUMENT_CHARS, MAX_UPLOAD_BYTES, titleFrom } from './documents.dto';
-import { DocumentsService } from './documents.service';
+import {
+  CreateDocumentDto,
+  DocumentDetail,
+  DocumentSummary,
+  MAX_DOCUMENT_CHARS,
+  MAX_UPLOAD_BYTES,
+  titleFrom,
+  UpdateDocumentDto,
+} from './documents.dto';
+import { DocumentsService, ReindexReport } from './documents.service';
 
 /** 201 for a new document, 200 when identical content already existed. */
 function respondCreated(res: Response, doc: DocumentSummary): DocumentSummary {
@@ -63,6 +72,31 @@ export class DocumentsController {
     if (content.length > MAX_DOCUMENT_CHARS) throw new BadRequestException('File is too large');
     const title = titleFrom(content, file.originalname.slice(0, -ext.length) || file.originalname);
     return respondCreated(res, await this.documents.create({ title, content, source: file.originalname }));
+  }
+
+  /** Re-index every document with the current chunking settings and embedding model. */
+  @Post('reindex')
+  @HttpCode(200)
+  reindexAll(): Promise<ReindexReport> {
+    return this.documents.reindexAll();
+  }
+
+  @Get(':id')
+  get(@Param('id', new ParseUUIDPipe()) id: string): Promise<DocumentDetail> {
+    return this.documents.get(id);
+  }
+
+  /** Change the title and/or text of a document; it is re-embedded. */
+  @Put(':id')
+  update(@Param('id', new ParseUUIDPipe()) id: string, @Body() dto: UpdateDocumentDto): Promise<DocumentSummary> {
+    return this.documents.update(id, dto);
+  }
+
+  /** Re-index one document from its stored text. */
+  @Post(':id/reindex')
+  @HttpCode(200)
+  reindex(@Param('id', new ParseUUIDPipe()) id: string): Promise<DocumentSummary> {
+    return this.documents.reindex(id);
   }
 
   @Delete(':id')

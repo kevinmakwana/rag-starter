@@ -11,6 +11,12 @@ export interface DocumentSummary {
   duplicate: boolean;
 }
 
+export interface ReindexReport {
+  reindexed: number;
+  skipped: { id: string; title: string; reason: string }[];
+  failed: { id: string; title: string; reason: string }[];
+}
+
 export interface Source {
   n: number;
   documentId: string;
@@ -145,6 +151,7 @@ export const api = {
     form.append('file', file);
     return request<DocumentSummary>('/documents/upload', { method: 'POST', body: form });
   },
+  reindexAll: () => request<ReindexReport>('/documents/reindex', { method: 'POST' }),
   deleteDocument: (id: string) => request<void>(`/documents/${id}`, { method: 'DELETE' }),
   query: (question: string, documentIds?: string[]) =>
     request<QueryResult>('/query', json({ question, documentIds: documentIds?.length ? documentIds : undefined })),

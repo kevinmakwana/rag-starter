@@ -102,7 +102,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 `EMBEDDING_DIM` must match the embedding model (1536 for `text-embedding-3-small`). If you change it, drop the `chunks` table and re-ingest. The API refuses to start on a mismatch rather than failing at query time.
 
-> Switching from mock to OpenAI embeddings? (Also re-index after upgrading to the title-aware chunker if you want older documents to benefit.) Re-index: vectors from different models aren't comparable. Each document records the embedding model it was indexed with, so the API logs a warning at startup, reports `degraded` on `/health`, and refuses to add documents (409) while the index mixes models. Documents indexed before this was tracked have no recorded model and are not flagged. The quickest way is `docker compose down -v && npm run db:up && npm run seed`.
+> Switching from mock to OpenAI embeddings? (Also re-index after upgrading to the title-aware chunker if you want older documents to benefit.) Re-index: vectors from different models aren't comparable. Each document records the embedding model it was indexed with, so the API logs a warning at startup, reports `degraded` on `/health`, and refuses to add documents (409) while the index mixes models. Documents indexed before this was tracked have no recorded model and are not flagged. Call `POST /documents/reindex` (the web app shows a **Re-index all** button when it notices a mix). Documents indexed before source text was stored are skipped and must be uploaded again; a fresh start, `docker compose down -v && npm run db:up && npm run seed`, also works.
 
 ## API
 
@@ -112,6 +112,10 @@ ANTHROPIC_API_KEY=sk-ant-...
 | `GET` | `/documents` | | List indexed documents |
 | `POST` | `/documents` | `{ title, content }` | Index pasted text (≤ 500k chars). Identical content is never indexed twice: you get the existing document back (`duplicate: true`, HTTP 200). Returns 409 if the index was built with a different embedding model |
 | `POST` | `/documents/upload` | multipart `file` | `.md`, `.markdown`, `.txt`, `.pdf`, `.docx` (≤ 10 MB); first `# H1` becomes the title, else the file name. Word headings, lists and tables are kept as Markdown; unreadable, password-protected or scanned (no text layer, no OCR) files get a 400 that says why |
+| `GET` | `/documents/:id` | | The document with its full source text (`content` is `null` for documents indexed before text was stored) |
+| `PUT` | `/documents/:id` | `{ title?, content? }` | Change title and/or text; the document is re-chunked and re-embedded atomically (id and date kept). 409 if the new text duplicates another document |
+| `POST` | `/documents/:id/reindex` | | Re-index from the stored text with the current chunk settings and embedding model |
+| `POST` | `/documents/reindex` | | Re-index every document; returns `{ reindexed, skipped, failed }`. The fix after switching embedding model |
 | `DELETE` | `/documents/:id` | | Removes the document and its chunks |
 | `POST` | `/query` | `{ question, topK?, documentIds?, history? }` | Returns `answer`, `sources[]`, `meta` |
 | `POST` | `/query/stream` | same as `/query` | Server-Sent Events: `sources`, then `token`s, then `done` (the full result), or `error` |

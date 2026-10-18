@@ -57,6 +57,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     // Added after the first release: older databases get the column, their existing rows stay NULL
     // (a unique index allows many NULLs) and are simply never treated as duplicates.
     await this.query('ALTER TABLE documents ADD COLUMN IF NOT EXISTS content_hash text');
+    // The original text, so a document can be re-indexed or edited later. NULL for older documents.
+    await this.query('ALTER TABLE documents ADD COLUMN IF NOT EXISTS content text');
     // "provider/model/dimensions" of the embeddings; NULL for documents indexed before this was tracked.
     await this.query('ALTER TABLE documents ADD COLUMN IF NOT EXISTS embedding_model text');
     await this.query('CREATE UNIQUE INDEX IF NOT EXISTS documents_content_hash_idx ON documents(content_hash)');
