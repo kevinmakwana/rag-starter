@@ -100,18 +100,19 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 `EMBEDDING_DIM` must match the embedding model (1536 for `text-embedding-3-small`). If you change it, drop the `chunks` table and re-ingest. The API refuses to start on a mismatch rather than failing at query time.
 
-> Switching from mock to OpenAI embeddings? Re-index: vectors from different models aren't comparable. The quickest way is `docker compose down -v && npm run db:up && npm run seed`.
+> Switching from mock to OpenAI embeddings? Re-index: vectors from different models aren't comparable. Each document records the embedding model it was indexed with, so the API logs a warning at startup, reports `degraded` on `/health`, and refuses to add documents (409) while the index mixes models. Documents indexed before this was tracked have no recorded model and are not flagged. The quickest way is `docker compose down -v && npm run db:up && npm run seed`.
 
 ## API
 
 | Method | Path | Body | Notes |
 |---|---|---|---|
-| `GET` | `/health` | | DB check + active providers |
+| `GET` | `/health` | | DB check, active providers and embedding model; `status` is `degraded` if some documents were embedded with a different model |
 | `GET` | `/documents` | | List indexed documents |
-| `POST` | `/documents` | `{ title, content }` | Index pasted text (≤ 500k chars) |
+| `POST` | `/documents` | `{ title, content }` | Index pasted text (≤ 500k chars). Identical content is never indexed twice: you get the existing document back (`duplicate: true`, HTTP 200). Returns 409 if the index was built with a different embedding model |
 | `POST` | `/documents/upload` | multipart `file` | `.md`, `.markdown`, `.txt` (≤ 2 MB); first `# H1` becomes the title |
 | `DELETE` | `/documents/:id` | | Removes the document and its chunks |
-| `POST` | `/query` | `{ question, topK?, documentIds? }` | Returns `answer`, `sources[]`, `meta` |
+| `POST` | `/query` | `{ question, topK?, documentIds?, history? }` | Returns `answer`, `sources[]`, `meta` |
+| `POST` | `/query/stream` | same as `/query` | Server-Sent Events: `sources`, then `token`s, then `done` (the full result), or `error` |
 
 ```bash
 curl -s localhost:4000/query -H 'content-type: application/json' \
@@ -128,6 +129,13 @@ Response shape (values illustrative):
   ],
   "meta": { "embeddingProvider": "openai", "chatProvider": "anthropic", "retrieved": 4, "tookMs": 912 }
 }
+```
+
+`history` is the earlier chat, oldest first (`[{ "role": "user" | "assistant", "content": "…" }]`). When present, a follow-up like "and for annual plans?" is rewritten into a standalone question before retrieval (`meta.rewrittenQuestion` shows what was searched). Only the last `HISTORY_MESSAGES` messages are used, and with no history there is no extra model call.
+
+```bash
+curl -N localhost:4000/query/stream -H 'content-type: application/json' \
+  -d '{"question":"How long are backups kept?"}'
 ```
 
 Input is validated with `class-validator` (unknown fields are rejected), and upstream LLM errors come back as a clear `502` instead of an opaque `500`.
@@ -152,7 +160,7 @@ samples/                  fictional docs to try it with
 
 ## Configuration
 
-All settings live in the root `.env` (see [`.env.example`](.env.example)): providers and models, `EMBEDDING_DIM`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `TOP_K`, `MIN_SCORE`, ports and CORS.
+All settings live in the root `.env` (see [`.env.example`](.env.example)): providers and models, `EMBEDDING_DIM`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `TOP_K`, `MIN_SCORE`, `HISTORY_MESSAGES`, ports and CORS.
 
 ## Testing
 
@@ -165,7 +173,6 @@ The e2e suite boots the real Nest app against pgvector with the mock providers, 
 
 ## Ideas for next steps
 
-- Stream answers over SSE
 - PDF and DOCX ingestion
 - Hybrid search (pgvector + Postgres full-text) with reciprocal rank fusion
 - Re-ranking, and an eval set to measure retrieval quality

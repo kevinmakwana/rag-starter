@@ -39,3 +39,40 @@ export function citedIndexes(answer: string, available: number): number[] {
   }
   return [...seen];
 }
+
+/** A previous turn of the conversation, as sent by the client. */
+export interface HistoryMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+/** Keep the most recent messages, cap their length and drop blanks so history can't blow up the prompt. */
+export function trimHistory(
+  history: HistoryMessage[] | undefined,
+  { maxMessages, maxChars }: { maxMessages: number; maxChars: number },
+): HistoryMessage[] {
+  if (!history || maxMessages <= 0) return [];
+  return history
+    .slice(-maxMessages)
+    .map((m) => ({ role: m.role, content: m.content.trim().slice(0, maxChars) }))
+    .filter((m) => m.content);
+}
+
+export const REWRITE_SYSTEM_PROMPT = [
+  'Rewrite the follow-up question so it can be understood on its own, using the conversation for context.',
+  'Resolve pronouns and omitted subjects. Keep it short.',
+  'If the question is already self-contained, return it unchanged.',
+  'Reply with the rewritten question only: do not answer it and add no commentary.',
+].join(' ');
+
+/** Messages that ask the model to turn a follow-up into a standalone search question. */
+export function buildRewriteMessages(question: string, history: HistoryMessage[]): ChatMessage[] {
+  const transcript = history.map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n');
+  return [
+    { role: 'system', content: REWRITE_SYSTEM_PROMPT },
+    {
+      role: 'user',
+      content: `Conversation so far:\n${transcript}\n\nFollow-up question: ${question}\n\nStandalone question:`,
+    },
+  ];
+}

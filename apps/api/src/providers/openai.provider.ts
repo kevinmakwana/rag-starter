@@ -8,7 +8,7 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
 
   constructor(
     private readonly client: OpenAI,
-    private readonly model: string,
+    readonly model: string,
     readonly dimensions: number,
   ) {}
 
@@ -43,5 +43,16 @@ export class OpenAIChatProvider implements ChatProvider {
       temperature: 0.1,
     });
     return res.choices[0]?.message?.content?.trim() ?? '';
+  }
+
+  async *stream(messages: ChatMessage[], signal?: AbortSignal): AsyncGenerator<string> {
+    const res = await this.client.chat.completions.create(
+      { model: this.model, messages, temperature: 0.1, stream: true },
+      { signal },
+    );
+    for await (const chunk of res) {
+      const delta = chunk.choices[0]?.delta?.content;
+      if (delta) yield delta;
+    }
   }
 }

@@ -1,11 +1,16 @@
 'use client';
 
 import { FormEvent, Fragment, useCallback, useEffect, useRef, useState } from 'react';
-import { api, DocumentSummary, Health, QueryResult } from '@/lib/api';
+import { api, DocumentSummary, Health, HistoryMessage, QueryResult } from '@/lib/api';
+
+/** How many past question/answer pairs are sent along so follow-ups make sense. */
+const HISTORY_TURNS = 3;
 
 interface Turn {
   id: number;
   question: string;
+  /** Answer text received so far; replaced by `result.answer` once the stream finishes. */
+  partial: string;
   result?: QueryResult;
   error?: string;
 }
@@ -65,7 +70,12 @@ export default function Home() {
     setNotice(null);
     try {
       const doc = await fn();
-      setNotice({ kind: 'ok', text: `${label} "${doc.title}" (${doc.chunkCount} chunks)` });
+      setNotice({
+        kind: 'ok',
+        text: doc.duplicate
+          ? `"${doc.title}" is already indexed, nothing to add`
+          : `${label} "${doc.title}" (${doc.chunkCount} chunks)`,
+      });
       await refresh();
       return true;
     } catch (err) {
@@ -119,14 +129,26 @@ export default function Home() {
     const q = question.trim();
     if (!q || asking) return;
     const id = Date.now();
-    setTurns((t) => [...t, { id, question: q }]);
+    // Earlier answered turns, oldest first. Failed or unanswered turns carry no context.
+    const history: HistoryMessage[] = turns
+      .filter((turn) => turn.result)
+      .slice(-HISTORY_TURNS)
+      .flatMap((turn) => [
+        { role: 'user' as const, content: turn.question },
+        { role: 'assistant' as const, content: turn.result!.answer },
+      ]);
+    const update = (patch: (turn: Turn) => Turn) =>
+      setTurns((t) => t.map((turn) => (turn.id === id ? patch(turn) : turn)));
+    setTurns((t) => [...t, { id, question: q, partial: '' }]);
     setQuestion('');
     setAsking(true);
     try {
-      const result = await api.query(q, [...selected]);
-      setTurns((t) => t.map((turn) => (turn.id === id ? { ...turn, result } : turn)));
+      const result = await api.queryStream(q, [...selected], history, {
+        onToken: (text) => update((turn) => ({ ...turn, partial: turn.partial + text })),
+      });
+      update((turn) => ({ ...turn, result }));
     } catch (err) {
-      setTurns((t) => t.map((turn) => (turn.id === id ? { ...turn, error: (err as Error).message } : turn)));
+      update((turn) => ({ ...turn, error: (err as Error).message }));
     } finally {
       setAsking(false);
     }
@@ -183,6 +205,13 @@ export default function Home() {
           </form>
         )}
 
+        {health && health.mismatchedDocuments > 0 && (
+          <p className="notice error">
+            {health.mismatchedDocuments} document(s) were indexed with a different embedding model than the active one
+            ({health.embeddingModel}). Search results will be unreliable until you re-index.
+          </p>
+        )}
+
         {notice && <p className={`notice ${notice.kind}`}>{notice.text}</p>}
 
         <h2>
@@ -231,11 +260,15 @@ export default function Home() {
           {turns.map((turn) => (
             <article key={turn.id} className="turn">
               <p className="question">{turn.question}</p>
-              {!turn.result && !turn.error && <p className="muted">Thinking…</p>}
+              {!turn.result && !turn.error && !turn.partial && <p className="muted">Thinking…</p>}
+              {!turn.result && turn.partial && <Answer text={turn.partial} turnId={turn.id} />}
               {turn.error && <p className="notice error">{turn.error}</p>}
               {turn.result && (
                 <>
                   <Answer text={turn.result.answer} turnId={turn.id} />
+                  {turn.result.meta.rewrittenQuestion && (
+                    <p className="muted small">Searched for: “{turn.result.meta.rewrittenQuestion}”</p>
+                  )}
                   {turn.result.sources.length > 0 && (
                     <details className="sources" open>
                       <summary>

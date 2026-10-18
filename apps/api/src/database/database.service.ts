@@ -54,6 +54,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         chunk_count integer NOT NULL DEFAULT 0,
         created_at  timestamptz NOT NULL DEFAULT now()
       )`);
+    // Added after the first release: older databases get the column, their existing rows stay NULL
+    // (a unique index allows many NULLs) and are simply never treated as duplicates.
+    await this.query('ALTER TABLE documents ADD COLUMN IF NOT EXISTS content_hash text');
+    // "provider/model/dimensions" of the embeddings; NULL for documents indexed before this was tracked.
+    await this.query('ALTER TABLE documents ADD COLUMN IF NOT EXISTS embedding_model text');
+    await this.query('CREATE UNIQUE INDEX IF NOT EXISTS documents_content_hash_idx ON documents(content_hash)');
     await this.query(`
       CREATE TABLE IF NOT EXISTS chunks (
         id          bigserial PRIMARY KEY,

@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { REWRITE_SYSTEM_PROMPT } from '../query/prompt';
 import { ChatMessage, ChatProvider, EmbeddingProvider } from './types';
 
 const STOPWORDS = new Set(
@@ -33,6 +34,7 @@ export function tokenize(text: string): string[] {
  */
 export class MockEmbeddingProvider implements EmbeddingProvider {
   readonly name = 'mock';
+  readonly model = 'hashed-bow';
 
   constructor(readonly dimensions: number) {}
 
@@ -63,6 +65,7 @@ export class MockChatProvider implements ChatProvider {
   readonly name = 'mock';
 
   async complete(messages: ChatMessage[]): Promise<string> {
+    if (messages[0]?.content === REWRITE_SYSTEM_PROMPT) return this.rewrite(messages);
     const user = messages.filter((m) => m.role === 'user').pop()?.content ?? '';
     const firstSource = user.match(/\[1\][^\n]*\n([\s\S]*?)(?:\n\[2\]|\n\nQuestion:)/);
     if (!firstSource) {
@@ -73,5 +76,27 @@ export class MockChatProvider implements ChatProvider {
       `(Mock mode: no LLM is configured, so this is the top retrieved passage.)\n\n` +
       `${excerpt}${excerpt.length >= 400 ? '…' : ''} [1]`
     );
+  }
+
+  /**
+   * Offline stand-in for question rewriting: prepend the previous user question to the follow-up.
+   * Crude (it does it even for self-contained questions) but enough for keyword retrieval.
+   */
+  private rewrite(messages: ChatMessage[]): string {
+    const prompt = messages[1]?.content ?? '';
+    const followUp = prompt.match(/Follow-up question: (.*)\n\nStandalone question:/s)?.[1] ?? '';
+    const previous = [...prompt.matchAll(/^User: (.*)$/gm)].pop()?.[1] ?? '';
+    return `${previous} ${followUp}`.trim();
+  }
+
+  /** Word-by-word, with a small delay so the streaming UI is visible offline. */
+  async *stream(messages: ChatMessage[], signal?: AbortSignal): AsyncGenerator<string> {
+    const answer = await this.complete(messages);
+    // Split after whitespace so the pieces always join back to the original text.
+    for (const piece of answer.split(/(?<=\s)(?=\S)/)) {
+      if (signal?.aborted) return;
+      yield piece;
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
   }
 }
