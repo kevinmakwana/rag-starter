@@ -212,8 +212,9 @@ describeIfDb('API (e2e)', () => {
     );
 
     const cfg = app.get<AppConfig>(APP_CONFIG);
-    const mode = cfg.searchMode;
+    const { searchMode, exactSearchMaxChunks } = cfg;
     cfg.searchMode = 'vector'; // hybrid's full-text half would rescue the passage and hide the problem
+    cfg.exactSearchMaxChunks = 0; // exact search would sidestep the index; this test is about the index path
     try {
       const result = await readJson(
         await post('/query', { question: 'alpha beta gamma delta', documentIds: [small.id], topK: 3 }),
@@ -225,15 +226,16 @@ describeIfDb('API (e2e)', () => {
       );
       expect(bigOnly.sources).toHaveLength(5);
     } finally {
-      cfg.searchMode = mode;
+      Object.assign(cfg, { searchMode, exactSearchMaxChunks });
       await fetch(`${base}/documents/${big.id}`, { method: 'DELETE' });
       await fetch(`${base}/documents/${small.id}`, { method: 'DELETE' });
     }
   });
 
   it('keeps vector search complete while many deleted chunks are still in the index', async () => {
-    // Deleting a document leaves its HNSW entries behind until VACUUM. A plain index scan spends its
-    // candidate slots on them and can come back with nothing live, so deletes would silently degrade search.
+    // Deleting a document leaves its HNSW entries behind until VACUUM, and an index full of them returns
+    // nothing live or a page of rows that are not the true nearest (random: it failed on CI, passed locally).
+    // Corpora up to EXACT_SEARCH_MAX_CHUNKS therefore bypass the index, which this test relies on.
     const client = new Client({ connectionString: DB });
     await client.connect();
     const cfg = app.get<AppConfig>(APP_CONFIG);

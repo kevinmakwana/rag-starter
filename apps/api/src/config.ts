@@ -23,6 +23,8 @@ export interface AppConfig {
   minScore: number;
   /** `hybrid` fuses vector search with Postgres full-text search; `vector` uses embeddings only. */
   searchMode: SearchMode;
+  /** Up to this many chunks, vector search is exact instead of using the approximate HNSW index (0 = always HNSW). */
+  exactSearchMaxChunks: number;
   /** `llm` reorders the retrieved passages with the chat model (one extra call per question). */
   reranker: RerankerName;
   /** How many previous chat messages are used to resolve follow-up questions (0 disables memory). */
@@ -60,6 +62,7 @@ export function loadConfig(): AppConfig {
     topK: int('TOP_K', 5),
     minScore: 0,
     searchMode: oneOf('SEARCH_MODE', ['vector', 'hybrid'] as const, 'hybrid'),
+    exactSearchMaxChunks: int('EXACT_SEARCH_MAX_CHUNKS', 20000),
     reranker: oneOf('RERANKER', ['none', 'llm'] as const, 'none'),
     historyMessages: int('HISTORY_MESSAGES', 6),
     openai: {
@@ -77,6 +80,7 @@ export function loadConfig(): AppConfig {
   const rawMin = process.env.MIN_SCORE;
   cfg.minScore = rawMin ? Number(rawMin) : cfg.embeddingProvider === 'mock' ? 0.05 : 0.2;
 
+  if (cfg.exactSearchMaxChunks < 0) throw new Error('EXACT_SEARCH_MAX_CHUNKS must be 0 or more');
   if (cfg.historyMessages < 0) throw new Error('HISTORY_MESSAGES must be 0 or more');
   if (cfg.chunkOverlap >= cfg.chunkSize) {
     throw new Error('CHUNK_OVERLAP must be smaller than CHUNK_SIZE');

@@ -61,14 +61,27 @@ export class QueryService {
   ) {}
 
   /**
-   * Nearest chunks by cosine similarity, via the HNSW index.
+   * Is the chunk table small enough to search exactly? Uses Postgres' own row estimate (free, and
+   * -1 for a table that has never been analysed, i.e. a small one), so it costs no scan.
+   */
+  private async useExactSearch(): Promise<boolean> {
+    const max = this.cfg.exactSearchMaxChunks ?? 0;
+    if (max <= 0) return false;
+    const { rows } = await this.db.query<{ estimate: string | number }>(
+      "SELECT reltuples::bigint AS estimate FROM pg_class WHERE oid = 'chunks'::regclass",
+    );
+    return !(Number(rows[0]?.estimate) > max);
+  }
+
+  /**
+   * Nearest chunks by cosine similarity.
    *
-   * An HNSW scan is approximate and stops after its ef_search candidates *before* the WHERE clause and
-   * row visibility apply. Entries of deleted chunks linger in the index until VACUUM, and a document
-   * filter discards candidates too, so the scan can come back short or even empty while matching rows
-   * exist (iterative scans don't help with the deleted entries). When fewer rows than requested come
-   * back we re-run as an exact scan: `+ 0` stops Postgres from using the index for ordering, yet a
-   * document filter still uses its own btree. That is cheap at starter scale and makes search correct.
+   * HNSW is approximate, and entries of deleted chunks linger in the index until VACUUM. We measured
+   * an index full of them returning no live rows at all, and (by chance of the random graph) other
+   * times a full page of rows that were not the true nearest. A document filter can starve the scan
+   * too. So a table up to EXACT_SEARCH_MAX_CHUNKS is searched exactly (`+ 0` stops Postgres using the
+   * index for ordering, while a document filter still uses its own btree). Above that the index is
+   * used, and if it returns fewer rows than requested the query is re-run exactly.
    */
   private async vectorSearch(vector: string, limit: number, documentIds?: string[]): Promise<RetrievedChunk[]> {
     const params: unknown[] = [vector, limit];
@@ -94,10 +107,11 @@ export class QueryService {
       );
       return rows.map((r) => ({ ...r, score: Number(r.score) }));
     };
+    const exactOrder = '(c.embedding <=> $1::vector) + 0';
 
+    if (await this.useExactSearch()) return run(exactOrder);
     const approximate = await run('c.embedding <=> $1::vector');
-    if (approximate.length >= limit) return approximate;
-    return run('(c.embedding <=> $1::vector) + 0');
+    return approximate.length >= limit ? approximate : run(exactOrder);
   }
 
   /** Chunks containing any word of the question, best full-text match first. Scores are still cosine. */

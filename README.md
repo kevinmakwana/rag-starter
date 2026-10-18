@@ -162,12 +162,12 @@ samples/                  fictional docs to try it with
 
 ## Configuration
 
-All settings live in the root `.env` (see [`.env.example`](.env.example)): providers and models, `EMBEDDING_DIM`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `TOP_K`, `MIN_SCORE`, `SEARCH_MODE`, `RERANKER`, `HISTORY_MESSAGES`, ports and CORS.
+All settings live in the root `.env` (see [`.env.example`](.env.example)): providers and models, `EMBEDDING_DIM`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `TOP_K`, `MIN_SCORE`, `SEARCH_MODE`, `EXACT_SEARCH_MAX_CHUNKS`, `RERANKER`, `HISTORY_MESSAGES`, ports and CORS.
 
 ## Retrieval details
 
 - **Re-ranking** (`RERANKER=llm`): retrieval fetches three times as many passages, the chat model orders them in one extra call, and the top `TOP_K` are kept. Off by default; any failure falls back to the retrieval order.
-- **Exact-scan fallback:** HNSW is approximate, and entries of deleted chunks stay in the index until `VACUUM`. In testing, an index full of deleted entries returned *no* rows at all for queries that an exact scan answered fine, and a document filter can starve results the same way. So when the index returns fewer rows than requested, the query is re-run as an exact scan. This is cheap at starter scale; for very large corpora, vacuum regularly and consider raising `hnsw.ef_search`.
+- **Exact search for small corpora:** HNSW is approximate, and entries of deleted chunks stay in the index until `VACUUM`. In testing, an index full of them returned no live rows at all, and at other times a full page of rows that were not the true nearest (it depends on the random graph, so it showed up on CI but not locally). Up to `EXACT_SEARCH_MAX_CHUNKS` chunks (default 20000, a few tens of milliseconds at most) vector search is therefore exact. Above that it uses the HNSW index and re-runs exactly if the index returns fewer rows than requested, but recall can still dip after large deletes until autovacuum catches up: vacuum regularly and consider raising `hnsw.ef_search` for big corpora.
 
 ## Measuring retrieval
 
