@@ -71,6 +71,26 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         content     text NOT NULL,
         embedding   vector(${dim}) NOT NULL
       )`);
+    // Background ingestion queue (see jobs/). Payload and file are dropped once a job finishes.
+    await this.query(`
+      CREATE TABLE IF NOT EXISTS ingestion_jobs (
+        id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        kind           text NOT NULL,
+        status         text NOT NULL DEFAULT 'queued',
+        title          text,
+        payload        jsonb,
+        file           bytea,
+        result         jsonb,
+        error          text,
+        progress_done  integer NOT NULL DEFAULT 0,
+        progress_total integer,
+        created_at     timestamptz NOT NULL DEFAULT now(),
+        started_at     timestamptz,
+        finished_at    timestamptz
+      )`);
+    await this.query(
+      "CREATE INDEX IF NOT EXISTS ingestion_jobs_queue_idx ON ingestion_jobs(created_at) WHERE status = 'queued'",
+    );
     await this.query('CREATE INDEX IF NOT EXISTS chunks_document_idx ON chunks(document_id)');
     // Full-text side of hybrid search. Generated, so it stays in sync with heading/content for free.
     await this.query(`

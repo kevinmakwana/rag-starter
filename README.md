@@ -116,6 +116,10 @@ ANTHROPIC_API_KEY=sk-ant-...
 | `PUT` | `/documents/:id` | `{ title?, content? }` | Change title and/or text; the document is re-chunked and re-embedded atomically (id and date kept). 409 if the new text duplicates another document |
 | `POST` | `/documents/:id/reindex` | | Re-index from the stored text with the current chunk settings and embedding model |
 | `POST` | `/documents/reindex` | | Re-index every document; returns `{ reindexed, skipped, failed }`. The fix after switching embedding model |
+| `POST` | `/jobs/documents` | `{ title, content }` | Same as `POST /documents` but in the background: answers `202` with a job |
+| `POST` | `/jobs/upload` | multipart `file` | Same as `POST /documents/upload`, extraction included, in the background (an unsupported file type is still a `400` straight away) |
+| `POST` | `/jobs/reindex` | | Re-index everything in the background, with progress |
+| `GET` | `/jobs/:id` | | `status` (`queued`, `running`, `succeeded`, `failed`), `progress`, and the `result` or `error`; `GET /jobs` lists recent jobs |
 | `DELETE` | `/documents/:id` | | Removes the document and its chunks |
 | `POST` | `/query` | `{ question, topK?, documentIds?, history? }` | Returns `answer`, `sources[]`, `meta` |
 | `POST` | `/query/stream` | same as `/query` | Server-Sent Events: `sources`, then `token`s, then `done` (the full result), or `error` |
@@ -169,6 +173,10 @@ samples/                  fictional docs to try it with
 ## Configuration
 
 All settings live in the root `.env` (see [`.env.example`](.env.example)): providers and models, `EMBEDDING_DIM`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `TOP_K`, `MIN_SCORE`, `SEARCH_MODE`, `EXACT_SEARCH_MAX_CHUNKS`, `RERANKER`, `HISTORY_MESSAGES`, ports and CORS.
+
+## Background jobs
+
+Slow work (parsing a big PDF, embedding hundreds of chunks, re-indexing everything) can run as a job instead of holding a request open. The queue is a Postgres table worked off inside the API process (`INGEST_CONCURRENCY`, default 2), so it needs no extra service. Queued jobs survive a restart; a job that was *running* when the server stopped is marked failed, not retried, because retrying a file that crashed the parser could loop forever. That recovery assumes a single API process (claiming jobs is safe with several; recovery would fail another instance's live jobs). Uploaded bytes and pasted text are deleted from the job row as soon as it finishes, and finished jobs are purged after 7 days. The web app uses jobs for uploads, pasted text and **Re-index all**.
 
 ## Retrieval details
 

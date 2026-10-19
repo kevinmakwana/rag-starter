@@ -25,6 +25,8 @@ export interface AppConfig {
   searchMode: SearchMode;
   /** Up to this many chunks, vector search is exact instead of using the approximate HNSW index (0 = always HNSW). */
   exactSearchMaxChunks: number;
+  /** How many background ingestion jobs run at once. */
+  ingestConcurrency: number;
   /** `llm` reorders the retrieved passages with the chat model (one extra call per question). */
   reranker: RerankerName;
   /** How many previous chat messages are used to resolve follow-up questions (0 disables memory). */
@@ -64,6 +66,7 @@ export function loadConfig(): AppConfig {
     minScore: 0,
     searchMode: oneOf('SEARCH_MODE', ['vector', 'hybrid'] as const, 'hybrid'),
     exactSearchMaxChunks: int('EXACT_SEARCH_MAX_CHUNKS', 20000),
+    ingestConcurrency: int('INGEST_CONCURRENCY', 2),
     reranker: oneOf('RERANKER', ['none', 'llm'] as const, 'none'),
     historyMessages: int('HISTORY_MESSAGES', 6),
     openai: {
@@ -84,6 +87,9 @@ export function loadConfig(): AppConfig {
   cfg.minScore = rawMin ? Number(rawMin) : cfg.embeddingProvider === 'mock' ? 0.05 : 0.2;
 
   if (cfg.exactSearchMaxChunks < 0) throw new Error('EXACT_SEARCH_MAX_CHUNKS must be 0 or more');
+  if (!Number.isInteger(cfg.ingestConcurrency) || cfg.ingestConcurrency < 1) {
+    throw new Error('INGEST_CONCURRENCY must be a whole number of at least 1');
+  }
   if (cfg.historyMessages < 0) throw new Error('HISTORY_MESSAGES must be 0 or more');
   if (cfg.chunkOverlap >= cfg.chunkSize) {
     throw new Error('CHUNK_OVERLAP must be smaller than CHUNK_SIZE');

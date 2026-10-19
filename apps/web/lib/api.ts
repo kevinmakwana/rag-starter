@@ -17,6 +17,16 @@ export interface ReindexReport {
   failed: { id: string; title: string; reason: string }[];
 }
 
+export interface Job {
+  id: string;
+  kind: 'ingest_text' | 'ingest_file' | 'reindex_all';
+  status: 'queued' | 'running' | 'succeeded' | 'failed';
+  title: string | null;
+  progress?: { done: number; total: number };
+  result?: unknown;
+  error?: string;
+}
+
 export interface Source {
   n: number;
   documentId: string;
@@ -96,6 +106,17 @@ async function* readSse(body: ReadableStream<Uint8Array>): AsyncGenerator<{ even
   }
 }
 
+/** Poll a background job until it finishes; resolves with its result or throws its error. */
+async function waitForJob<T>(job: Job, intervalMs = 400): Promise<T> {
+  let current = job;
+  while (current.status === 'queued' || current.status === 'running') {
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    current = await request<Job>(`/jobs/${current.id}`);
+  }
+  if (current.status === 'failed') throw new Error(current.error ?? 'The job failed.');
+  return current.result as T;
+}
+
 const json = (body: unknown): RequestInit => ({
   method: 'POST',
   headers: { 'content-type': 'application/json' },
@@ -144,14 +165,15 @@ async function queryStream(
 export const api = {
   health: () => request<Health>('/health'),
   listDocuments: () => request<DocumentSummary[]>('/documents'),
-  createDocument: (title: string, content: string) =>
-    request<DocumentSummary>('/documents', json({ title, content })),
-  uploadDocument: (file: File) => {
+  // Indexing runs as a background job so big PDFs and slow embedding calls don't hold a request open.
+  createDocument: async (title: string, content: string) =>
+    waitForJob<DocumentSummary>(await request<Job>('/jobs/documents', json({ title, content }))),
+  uploadDocument: async (file: File) => {
     const form = new FormData();
     form.append('file', file);
-    return request<DocumentSummary>('/documents/upload', { method: 'POST', body: form });
+    return waitForJob<DocumentSummary>(await request<Job>('/jobs/upload', { method: 'POST', body: form }));
   },
-  reindexAll: () => request<ReindexReport>('/documents/reindex', { method: 'POST' }),
+  reindexAll: async () => waitForJob<ReindexReport>(await request<Job>('/jobs/reindex', { method: 'POST' })),
   deleteDocument: (id: string) => request<void>(`/documents/${id}`, { method: 'DELETE' }),
   query: (question: string, documentIds?: string[]) =>
     request<QueryResult>('/query', json({ question, documentIds: documentIds?.length ? documentIds : undefined })),

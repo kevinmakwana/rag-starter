@@ -11,6 +11,8 @@ import { join, resolve } from 'path';
 import { Client } from 'pg';
 import { APP_CONFIG, AppConfig } from '../src/config';
 import { evaluate } from '../src/eval/evaluate';
+import { JobsService } from '../src/jobs/jobs.service';
+import { EMBEDDING_PROVIDER, EmbeddingProvider } from '../src/providers/types';
 import { QueryService } from '../src/query/query.service';
 import { bullet, makeDocx, makePdf, para } from './helpers/office';
 
@@ -319,6 +321,167 @@ describeIfDb('API (e2e)', () => {
       const added = await post('/documents', { title: 'Allowed', content: 'Allowed once the index is consistent.' });
       expect(added.status).toBe(201);
       for (const id of [ok.id, stale.id, legacy.id, (await readJson(added)).id]) await remove(id);
+    });
+  });
+
+  describe('background jobs', () => {
+    const enqueue = (path: string, body: unknown) =>
+      fetch(`${base}/jobs/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const getJob = async (id: string) => readJson(await fetch(`${base}/jobs/${id}`));
+    const settled = async (id: string, timeoutMs = 10_000) => {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const job = await getJob(id);
+        if (job.status === 'succeeded' || job.status === 'failed') return job;
+        if (Date.now() > deadline) throw new Error(`job ${id} still ${job.status} after ${timeoutMs}ms`);
+        await new Promise((r) => setTimeout(r, 25));
+      }
+    };
+    const rm = (id: string) => fetch(`${base}/documents/${id}`, { method: 'DELETE' });
+    const sql = async (statement: string, params: unknown[] = []) => {
+      const client = new Client({ connectionString: DB });
+      await client.connect();
+      try {
+        return await client.query(statement, params);
+      } finally {
+        await client.end();
+      }
+    };
+
+    it('indexes pasted text in the background and reports the result', async () => {
+      const res = await enqueue('documents', { title: 'Queued', content: '# Queued\n\n## Parking\n\nVisitors park in bay C.' });
+
+      expect(res.status).toBe(202);
+      const accepted = await readJson(res);
+      expect(accepted).toMatchObject({ kind: 'ingest_text', title: 'Queued' });
+      expect(['queued', 'running', 'succeeded']).toContain(accepted.status);
+
+      const job = await settled(accepted.id);
+      expect(job.status).toBe('succeeded');
+      expect(job.result).toMatchObject({ title: 'Queued', chunkCount: 1, duplicate: false });
+      expect(job.finishedAt).toBeTruthy();
+      expect((await readJson(await post('/query', { question: 'Where do visitors park?' }))).answer).toContain('bay C');
+      await rm(job.result.id);
+    });
+
+    it('returns before the work is done', async () => {
+      const embeddings = app.get<EmbeddingProvider>(EMBEDDING_PROVIDER);
+      const original = embeddings.embed.bind(embeddings);
+      embeddings.embed = async (texts) => {
+        await new Promise((r) => setTimeout(r, 600));
+        return original(texts);
+      };
+      try {
+        const started = Date.now();
+        const accepted = await readJson(await enqueue('documents', { title: 'Slow', content: 'Slow text that takes a while to embed.' }));
+        const elapsed = Date.now() - started;
+
+        expect(elapsed).toBeLessThan(400);
+        expect(['queued', 'running']).toContain(accepted.status);
+        expect((await getJob(accepted.id)).result).toBeUndefined();
+
+        const job = await settled(accepted.id);
+        expect(job.status).toBe('succeeded');
+        await rm(job.result.id);
+      } finally {
+        embeddings.embed = original;
+      }
+    });
+
+    it('runs file uploads as jobs, including extraction', async () => {
+      const docx = await makeDocx([para('Travel policy', 'Heading1'), para('Flights', 'Heading2'), para('Book economy.')].join(''));
+      const form = new FormData();
+      form.append('file', new Blob([docx]), 'travel.docx');
+
+      const res = await fetch(`${base}/jobs/upload`, { method: 'POST', body: form });
+
+      expect(res.status).toBe(202);
+      const job = await settled((await readJson(res)).id);
+      expect(job).toMatchObject({ kind: 'ingest_file', status: 'succeeded', title: 'travel.docx' });
+      expect(job.result.title).toBe('Travel policy');
+      await rm(job.result.id);
+    });
+
+    it('rejects an unsupported file type up front, but reports an unreadable file as a failed job', async () => {
+      const bad = new FormData();
+      bad.append('file', new Blob(['x']), 'sheet.xlsx');
+      expect((await fetch(`${base}/jobs/upload`, { method: 'POST', body: bad })).status).toBe(400);
+
+      const broken = new FormData();
+      broken.append('file', new Blob(['definitely not a pdf']), 'broken.pdf');
+      const res = await fetch(`${base}/jobs/upload`, { method: 'POST', body: broken });
+      expect(res.status).toBe(202);
+      const job = await settled((await readJson(res)).id);
+      expect(job.status).toBe('failed');
+      expect(job.error).toMatch(/PDF/);
+      expect(job.result).toBeUndefined();
+    });
+
+    it('reports duplicates and validation errors through the job', async () => {
+      const body = { title: 'Twice', content: 'The same text submitted twice in a row.' };
+      const first = await settled((await readJson(await enqueue('documents', body))).id);
+      const second = await settled((await readJson(await enqueue('documents', body))).id);
+
+      expect(second.status).toBe('succeeded');
+      expect(second.result).toMatchObject({ id: first.result.id, duplicate: true });
+
+      const empty = await settled((await readJson(await enqueue('documents', { title: 'Blank', content: '   ' }))).id);
+      expect(empty.status).toBe('failed');
+      expect(empty.error).toMatch(/no text/i);
+      await rm(first.result.id);
+    });
+
+    it('re-indexes everything as a job with progress', async () => {
+      const a = (await readJson(await post('/documents', { title: 'A', content: 'First document text.' }))).id;
+      const b = (await readJson(await post('/documents', { title: 'B', content: 'Second document text.' }))).id;
+
+      const accepted = await readJson(await enqueue('reindex', {}));
+      const job = await settled(accepted.id);
+
+      expect(accepted.kind).toBe('reindex_all');
+      expect(job.status).toBe('succeeded');
+      expect(job.result).toMatchObject({ reindexed: 2, skipped: [], failed: [] });
+      expect(job.progress).toEqual({ done: 2, total: 2 });
+      await rm(a);
+      await rm(b);
+    });
+
+    it('validates job lookups, lists recent jobs, and never exposes payloads', async () => {
+      expect((await fetch(`${base}/jobs/not-a-uuid`)).status).toBe(400);
+      expect((await fetch(`${base}/jobs/00000000-0000-4000-8000-000000000000`)).status).toBe(404);
+
+      const job = await settled((await readJson(await enqueue('documents', { title: 'Listed', content: 'Listed job text.' }))).id);
+      const list = await readJson(await fetch(`${base}/jobs`));
+      expect(list.map((j: { id: string }) => j.id)).toContain(job.id);
+      expect(JSON.stringify(list)).not.toContain('Listed job text.');
+      await rm(job.result.id);
+    });
+
+    it('drops the stored payload once a job has finished', async () => {
+      const job = await settled((await readJson(await enqueue('documents', { title: 'Payload', content: 'Payload text to be dropped.' }))).id);
+      const { rows } = await sql('SELECT payload, file FROM ingestion_jobs WHERE id = $1', [job.id]);
+      expect(rows[0]).toEqual({ payload: null, file: null });
+      await rm(job.result.id);
+    });
+
+    it('marks jobs that were running when the server stopped as failed, and purges old finished ones', async () => {
+      const jobs = app.get(JobsService);
+      const { rows } = await sql(
+        `INSERT INTO ingestion_jobs (kind, status, title, started_at) VALUES ('ingest_text', 'running', 'Interrupted', now())
+         RETURNING id`,
+      );
+      await sql(
+        `INSERT INTO ingestion_jobs (kind, status, title, finished_at, created_at)
+         VALUES ('ingest_text', 'succeeded', 'Ancient', now() - interval '30 days', now() - interval '30 days')`,
+      );
+
+      await jobs.recoverInterrupted();
+      await jobs.purgeOld();
+
+      const interrupted = await getJob(rows[0].id);
+      expect(interrupted.status).toBe('failed');
+      expect(interrupted.error).toMatch(/restart/i);
+      expect((await sql("SELECT 1 FROM ingestion_jobs WHERE title = 'Ancient'")).rowCount).toBe(0);
     });
   });
 

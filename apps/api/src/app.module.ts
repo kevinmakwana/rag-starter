@@ -4,6 +4,7 @@ import { DatabaseModule } from './database/database.module';
 import { DatabaseService } from './database/database.service';
 import { DocumentsModule } from './documents/documents.module';
 import { DocumentsService } from './documents/documents.service';
+import { JobsModule } from './jobs/jobs.module';
 import { ProvidersModule } from './providers/providers.module';
 import { QueryModule } from './query/query.module';
 
@@ -42,6 +43,7 @@ class HealthController {
     DatabaseModule,
     ProvidersModule,
     DocumentsModule,
+    JobsModule,
     QueryModule,
   ],
   controllers: [HealthController],

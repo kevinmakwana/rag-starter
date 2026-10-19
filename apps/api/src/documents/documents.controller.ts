@@ -16,15 +16,12 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Response } from 'express';
-import { extname } from 'path';
-import { ExtractionError, extractText } from '../ingestion/extractors';
+import { ExtractionError } from '../ingestion/extractors';
 import {
   CreateDocumentDto,
   DocumentDetail,
   DocumentSummary,
-  MAX_DOCUMENT_CHARS,
   MAX_UPLOAD_BYTES,
-  titleFrom,
   UpdateDocumentDto,
 } from './documents.dto';
 import { DocumentsService, ReindexReport } from './documents.service';
@@ -61,17 +58,12 @@ export class DocumentsController {
     @UploadedFile() file?: Express.Multer.File,
   ): Promise<DocumentSummary> {
     if (!file) throw new BadRequestException('Attach a file in the "file" field');
-    const ext = extname(file.originalname).toLowerCase();
-    let content: string;
     try {
-      content = await extractText(file.originalname, file.buffer);
+      return respondCreated(res, await this.documents.ingestFile(file.originalname, file.buffer));
     } catch (err) {
       if (err instanceof ExtractionError) throw new BadRequestException(err.message);
       throw err;
     }
-    if (content.length > MAX_DOCUMENT_CHARS) throw new BadRequestException('File is too large');
-    const title = titleFrom(content, file.originalname.slice(0, -ext.length) || file.originalname);
-    return respondCreated(res, await this.documents.create({ title, content, source: file.originalname }));
   }
 
   /** Re-index every document with the current chunking settings and embedding model. */

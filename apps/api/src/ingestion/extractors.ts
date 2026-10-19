@@ -207,6 +207,11 @@ const EXTRACTORS: readonly Extractor[] = [plainText, pdf, docx];
 
 export const SUPPORTED_EXTENSIONS: readonly string[] = EXTRACTORS.flatMap((e) => e.extensions);
 
+/** Is this file type one we can read? Cheap, so callers can reject early without parsing. */
+export function isSupportedFile(filename: string): boolean {
+  return SUPPORTED_EXTENSIONS.includes(extname(filename).toLowerCase());
+}
+
 /** Extract the text of an uploaded file, choosing the extractor by its extension. */
 export async function extractText(filename: string, buffer: Buffer): Promise<string> {
   const ext = extname(filename).toLowerCase();

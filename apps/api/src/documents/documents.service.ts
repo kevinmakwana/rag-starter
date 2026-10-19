@@ -8,12 +8,21 @@ import {
   OnApplicationBootstrap,
 } from '@nestjs/common';
 import { createHash } from 'crypto';
+import { extname } from 'path';
 import { PoolClient } from 'pg';
 import { APP_CONFIG, AppConfig } from '../config';
 import { DatabaseService, toVector } from '../database/database.service';
 import { Chunk, chunkText, embeddingText } from '../ingestion/chunker';
+import { extractText } from '../ingestion/extractors';
 import { EMBEDDING_PROVIDER, EmbeddingProvider } from '../providers/types';
-import { CreateDocumentDto, DocumentDetail, DocumentSummary, UpdateDocumentDto } from './documents.dto';
+import {
+  CreateDocumentDto,
+  DocumentDetail,
+  DocumentSummary,
+  MAX_DOCUMENT_CHARS,
+  titleFrom,
+  UpdateDocumentDto,
+} from './documents.dto';
 
 interface DocumentRow {
   id: string;
@@ -176,6 +185,18 @@ export class DocumentsService implements OnApplicationBootstrap {
     return toSummary(doc);
   }
 
+  /**
+   * Index an uploaded file: extract its text (throws ExtractionError for unreadable or unsupported
+   * files), title it from its first heading or its file name, then index it like pasted text.
+   */
+  async ingestFile(filename: string, buffer: Buffer): Promise<DocumentSummary> {
+    const content = await extractText(filename, buffer);
+    if (content.length > MAX_DOCUMENT_CHARS) throw new BadRequestException('File is too large');
+    const ext = extname(filename).toLowerCase();
+    const title = titleFrom(content, filename.slice(0, -ext.length) || filename);
+    return this.create({ title, content, source: filename });
+  }
+
   private async getRow(id: string): Promise<DocumentRow> {
     const { rows } = await this.db.query<DocumentRow>(
       `SELECT ${SUMMARY_COLUMNS}, content, content_hash FROM documents WHERE id = $1`,
@@ -255,14 +276,17 @@ export class DocumentsService implements OnApplicationBootstrap {
    * Re-index every document, e.g. after switching embedding model. One bad document does not stop
    * the rest; documents without stored text are skipped, failures are reported.
    */
-  async reindexAll(): Promise<ReindexReport> {
+  async reindexAll(onProgress?: (done: number, total: number) => Promise<void> | void): Promise<ReindexReport> {
     const { rows } = await this.db.query<{ id: string; title: string; has_content: boolean }>(
       'SELECT id, title, content IS NOT NULL AS has_content FROM documents ORDER BY created_at',
     );
     const report: ReindexReport = { reindexed: 0, skipped: [], failed: [] };
+    await onProgress?.(0, rows.length);
+    let done = 0;
     for (const row of rows) {
       if (!row.has_content) {
         report.skipped.push({ id: row.id, title: row.title, reason: 'Source text was not stored when it was indexed; upload it again.' });
+        await onProgress?.(++done, rows.length);
         continue;
       }
       try {
@@ -272,6 +296,7 @@ export class DocumentsService implements OnApplicationBootstrap {
         this.logger.warn(`Re-indexing "${row.title}" failed: ${(err as Error).message}`);
         report.failed.push({ id: row.id, title: row.title, reason: (err as Error).message });
       }
+      await onProgress?.(++done, rows.length);
     }
     return report;
   }
