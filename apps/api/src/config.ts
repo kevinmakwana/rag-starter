@@ -1,5 +1,6 @@
 import { config as loadEnv } from 'dotenv';
 import { resolve } from 'path';
+import { hashKey, parseApiKeys } from './auth/api-keys';
 
 // Load the repo-root .env first, then a local one (local wins only for unset keys).
 loadEnv({ path: resolve(process.cwd(), '../../.env') });
@@ -25,6 +26,8 @@ export interface AppConfig {
   searchMode: SearchMode;
   /** Up to this many chunks, vector search is exact instead of using the approximate HNSW index (0 = always HNSW). */
   exactSearchMaxChunks: number;
+  /** Hash of each accepted API key -> its user. Empty means authentication is off. */
+  auth: { keys: Map<string, string> };
   /** How many background ingestion jobs run at once. */
   ingestConcurrency: number;
   /** `llm` reorders the retrieved passages with the chat model (one extra call per question). */
@@ -66,6 +69,7 @@ export function loadConfig(): AppConfig {
     minScore: 0,
     searchMode: oneOf('SEARCH_MODE', ['vector', 'hybrid'] as const, 'hybrid'),
     exactSearchMaxChunks: int('EXACT_SEARCH_MAX_CHUNKS', 20000),
+    auth: { keys: new Map(parseApiKeys(process.env.API_KEYS).map(({ key, user }) => [hashKey(key), user])) },
     ingestConcurrency: int('INGEST_CONCURRENCY', 2),
     reranker: oneOf('RERANKER', ['none', 'llm'] as const, 'none'),
     historyMessages: int('HISTORY_MESSAGES', 6),

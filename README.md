@@ -174,6 +174,21 @@ samples/                  fictional docs to try it with
 
 All settings live in the root `.env` (see [`.env.example`](.env.example)): providers and models, `EMBEDDING_DIM`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `TOP_K`, `MIN_SCORE`, `SEARCH_MODE`, `EXACT_SEARCH_MAX_CHUNKS`, `RERANKER`, `HISTORY_MESSAGES`, ports and CORS.
 
+## Authentication and users
+
+Off by default so the quickstart just works; the API logs a warning at startup when it is. Set `API_KEYS` to turn it on:
+
+```bash
+API_KEYS=$(openssl rand -hex 24):alice,$(openssl rand -hex 24):bob   # key:user pairs
+curl -s localhost:4000/documents -H "Authorization: Bearer <alice's key>"    # or: -H "X-API-Key: <key>"
+```
+
+- Every route except `GET /health` then needs a key (`401` otherwise). Keys must be at least 16 characters, and a user may have several (for rotation). Only hashes of keys are kept in memory, and error messages never print one.
+- **Each user only ever sees their own documents and jobs**: lists, reads, edits, deletes, re-indexing, background jobs and, above all, search. Naming another user's document id in a query returns nothing, and another user's resources answer `404`, not `403`, so ids cannot be probed. Identical text uploaded by two users stays two documents (duplicates are detected per user).
+- Documents from before accounts existed, and everything created while auth is off, belong to the user `default`. After turning auth on, map a key to it (`<key>:default`) to keep access to them.
+- The web app asks for the key on first use and keeps it in this browser's `localStorage`; **Sign out** forgets it. Serve the API over HTTPS in production, since keys travel in a header.
+- This is access control for a shared deployment, not a full account system: there is no sign-up, per-key permissions or admin role. Switching the embedding model is index-wide, so each user must run **Re-index all** for their own documents. On a very large multi-tenant corpus, filtering by owner after an approximate (HNSW) search is slow; partition the table by owner instead.
+
 ## Background jobs
 
 Slow work (parsing a big PDF, embedding hundreds of chunks, re-indexing everything) can run as a job instead of holding a request open. The queue is a Postgres table worked off inside the API process (`INGEST_CONCURRENCY`, default 2), so it needs no extra service. Queued jobs survive a restart; a job that was *running* when the server stopped is marked failed, not retried, because retrying a file that crashed the parser could loop forever. That recovery assumes a single API process (claiming jobs is safe with several; recovery would fail another instance's live jobs). Uploaded bytes and pasted text are deleted from the job row as soon as it finishes, and finished jobs are purged after 7 days. The web app uses jobs for uploads, pasted text and **Re-index all**.

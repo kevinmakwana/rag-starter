@@ -71,6 +71,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         content     text NOT NULL,
         embedding   vector(${dim}) NOT NULL
       )`);
+    // Who a document belongs to. Documents from before accounts existed (and everything when
+    // authentication is off) belong to 'default'. Identical text from two users must stay two
+    // documents, so the content hash is unique per owner, not globally.
+    await this.query("ALTER TABLE documents ADD COLUMN IF NOT EXISTS owner_id text NOT NULL DEFAULT 'default'");
+    await this.query('CREATE UNIQUE INDEX IF NOT EXISTS documents_owner_hash_idx ON documents(owner_id, content_hash)');
+    await this.query('DROP INDEX IF EXISTS documents_content_hash_idx');
     // Background ingestion queue (see jobs/). Payload and file are dropped once a job finishes.
     await this.query(`
       CREATE TABLE IF NOT EXISTS ingestion_jobs (
@@ -80,6 +86,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         title          text,
         payload        jsonb,
         file           bytea,
+        owner_id       text NOT NULL DEFAULT 'default',
         result         jsonb,
         error          text,
         progress_done  integer NOT NULL DEFAULT 0,
@@ -88,6 +95,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         started_at     timestamptz,
         finished_at    timestamptz
       )`);
+    await this.query("ALTER TABLE ingestion_jobs ADD COLUMN IF NOT EXISTS owner_id text NOT NULL DEFAULT 'default'");
     await this.query(
       "CREATE INDEX IF NOT EXISTS ingestion_jobs_queue_idx ON ingestion_jobs(created_at) WHERE status = 'queued'",
     );

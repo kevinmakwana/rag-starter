@@ -55,19 +55,50 @@ export interface QueryResult {
 
 export interface Health {
   status: string;
+  authRequired: boolean;
   embeddingModel: string;
   mismatchedDocuments: number;
   embeddingProvider: string;
   chatProvider: string;
 }
 
+const KEY_STORAGE = 'rag-api-key';
+
+/** The API key lives in this browser only (localStorage); it is sent as a Bearer token. */
+export const apiKey = {
+  get(): string {
+    try {
+      return localStorage.getItem(KEY_STORAGE) ?? '';
+    } catch {
+      return '';
+    }
+  },
+  set(key: string): void {
+    try {
+      if (key) localStorage.setItem(KEY_STORAGE, key);
+      else localStorage.removeItem(KEY_STORAGE);
+    } catch {
+      /* storage unavailable: the key just won't persist */
+    }
+  },
+};
+
+/** The API wants a key and this browser has none, or the one it has is wrong. */
+export class AuthError extends Error {}
+
+const withAuth = (init?: RequestInit): RequestInit => {
+  const key = apiKey.get();
+  return key ? { ...init, headers: { ...init?.headers, authorization: `Bearer ${key}` } } : (init ?? {});
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
-    res = await fetch(`${API_URL}${path}`, init);
+    res = await fetch(`${API_URL}${path}`, withAuth(init));
   } catch {
     throw new Error(`Can't reach the API at ${API_URL}. Is it running?`);
   }
+  if (res.status === 401) throw new AuthError('This API needs a valid API key.');
   if (!res.ok) {
     const body = await res.json().catch(() => null);
     const message = Array.isArray(body?.message) ? body.message.join(', ') : body?.message;
@@ -134,17 +165,18 @@ async function queryStream(
   let res: Response;
   try {
     res = await fetch(`${API_URL}/query/stream`, {
-      ...json({
+      ...withAuth(json({
         question,
         documentIds: documentIds?.length ? documentIds : undefined,
         history: history.length ? history : undefined,
-      }),
+      })),
       signal,
     });
   } catch (err) {
     if ((err as Error).name === 'AbortError') throw err;
     throw new Error(`Can't reach the API at ${API_URL}. Is it running?`);
   }
+  if (res.status === 401) throw new AuthError('This API needs a valid API key.');
   if (!res.ok || !res.body) {
     const body = await res.json().catch(() => null);
     const message = Array.isArray(body?.message) ? body.message.join(', ') : body?.message;

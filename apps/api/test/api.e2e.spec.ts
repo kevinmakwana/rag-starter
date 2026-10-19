@@ -627,4 +627,151 @@ describeIfDb('API (e2e)', () => {
     expect(report.mrr).toBeGreaterThanOrEqual(0.98);
     expect(report.abstainRate).toBeGreaterThanOrEqual(0.3);
   });
+
+});
+
+describeIfDb('authentication and per-user isolation (e2e)', () => {
+  const ALICE = 'alice-key-0123456789';
+  const ALICE_2 = 'alice-second-key-0123';
+  const BOB = 'bobs-key-abcdefghijk';
+  const LEGACY = 'legacy-key-zyxwvutsrq';
+  let app: INestApplication;
+  let base: string;
+
+  beforeAll(async () => {
+    Object.assign(process.env, {
+      DATABASE_URL: DB,
+      EMBEDDING_PROVIDER: 'mock',
+      CHAT_PROVIDER: 'mock',
+      EMBEDDING_DIM: '256',
+      API_KEYS: `${ALICE}:alice,${ALICE_2}:alice,${BOB}:bob,${LEGACY}:default`,
+    });
+    const { AppModule } = await import('../src/app.module');
+    app = await NestFactory.create(AppModule, { logger: false });
+    delete process.env.API_KEYS; // loaded already; don't leak into other suites
+    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    await app.listen(0);
+    base = `http://127.0.0.1:${(app.getHttpServer().address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    for (const key of [ALICE, BOB, LEGACY]) {
+      const docs = await as(key, 'GET', '/documents').then(readJson);
+      await Promise.all(docs.map((d: { id: string }) => as(key, 'DELETE', `/documents/${d.id}`)));
+    }
+    await app?.close();
+  });
+
+  const as = (key: string | undefined, method: string, path: string, body?: unknown) =>
+    fetch(`${base}${path}`, {
+      method,
+      headers: { ...(key ? { authorization: `Bearer ${key}` } : {}), ...(body ? { 'content-type': 'application/json' } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  const mine = async (key: string, title: string, content: string) =>
+    readJson(await as(key, 'POST', '/documents', { title, content }));
+  const ask = async (key: string, question: string, extra: object = {}) =>
+    readJson(await as(key, 'POST', '/query', { question, ...extra }));
+  const settled = async (key: string, id: string) => {
+    for (let i = 0; i < 200; i++) {
+      const job = await readJson(await as(key, 'GET', `/jobs/${id}`));
+      if (job.status === 'succeeded' || job.status === 'failed') return job;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    throw new Error('job did not finish');
+  };
+
+  it('keeps health open, reports that a key is needed, and rejects everything else without one', async () => {
+    const health = await fetch(`${base}/health`);
+    expect(health.status).toBe(200);
+    expect(await readJson(health)).toMatchObject({ authRequired: true });
+
+    for (const [method, path] of [['GET', '/documents'], ['POST', '/query'], ['GET', '/jobs']]) {
+      expect((await as(undefined, method, path, method === 'POST' ? { question: 'x' } : undefined)).status).toBe(401);
+      expect((await as('wrong-key-wrong-key-1', method, path, method === 'POST' ? { question: 'x' } : undefined)).status).toBe(401);
+    }
+    expect((await as(undefined, 'POST', '/query/stream', { question: 'x' })).status).toBe(401);
+  });
+
+  it('accepts the key as X-API-Key and lets one user hold several keys', async () => {
+    const viaHeader = await fetch(`${base}/documents`, { headers: { 'x-api-key': ALICE } });
+    expect(viaHeader.status).toBe(200);
+
+    const doc = await mine(ALICE, 'Shared by keys', 'Text visible through both of Alice\'s keys.');
+    const second = await readJson(await as(ALICE_2, 'GET', '/documents'));
+    expect(second.map((d: { id: string }) => d.id)).toContain(doc.id);
+  });
+
+  it('shows each user only their own documents on every route', async () => {
+    const secret = await mine(ALICE, 'Alice private', '# Alice private\n\n## Safe\n\nThe vault code is zebra-4471.');
+
+    expect((await readJson(await as(BOB, 'GET', '/documents'))).map((d: { id: string }) => d.id)).not.toContain(secret.id);
+    expect((await as(BOB, 'GET', `/documents/${secret.id}`)).status).toBe(404);
+    expect((await as(BOB, 'PUT', `/documents/${secret.id}`, { title: 'Hijacked' })).status).toBe(404);
+    expect((await as(BOB, 'POST', `/documents/${secret.id}/reindex`)).status).toBe(404);
+    expect((await as(BOB, 'DELETE', `/documents/${secret.id}`)).status).toBe(404);
+
+    const intact = await readJson(await as(ALICE, 'GET', `/documents/${secret.id}`));
+    expect(intact.title).toBe('Alice private');
+  });
+
+  it('never retrieves another user\'s passages, with or without naming their document id', async () => {
+    const secret = await mine(ALICE, 'Alice vault', '# Alice vault\n\n## Code\n\nThe vault code is zebra-4471.');
+
+    const alice = await ask(ALICE, 'What is the vault code?');
+    expect(alice.answer).toContain('zebra-4471');
+
+    for (const extra of [{}, { documentIds: [secret.id] }]) {
+      const bob = await ask(BOB, 'What is the vault code?', extra);
+      expect(bob.sources).toHaveLength(0);
+      expect(bob.answer).toMatch(/don't know/);
+      expect(JSON.stringify(bob)).not.toContain('zebra');
+    }
+
+    const stream = await as(BOB, 'POST', '/query/stream', { question: 'What is the vault code?', documentIds: [secret.id] });
+    expect(await stream.text()).not.toContain('zebra');
+  });
+
+  it('treats identical text from two users as two documents, never handing one the other\'s', async () => {
+    const text = 'Both users happen to upload exactly this paragraph.';
+    const a = await mine(ALICE, 'Alice copy', text);
+    const b = await mine(BOB, 'Bob copy', text);
+
+    expect(b.duplicate).toBe(false);
+    expect(b.id).not.toBe(a.id);
+    expect(b.title).toBe('Bob copy'); // not Alice's title
+    expect((await mine(ALICE, 'Alice again', text)).duplicate).toBe(true); // within one user, dedupe still works
+
+    expect((await as(BOB, 'DELETE', `/documents/${b.id}`)).status).toBe(204);
+    expect((await as(ALICE, 'GET', `/documents/${a.id}`)).status).toBe(200);
+  });
+
+  it('scopes background jobs to their owner', async () => {
+    const res = await as(ALICE, 'POST', '/jobs/documents', { title: 'Alice job', content: 'Content of a job that only Alice may see.' });
+    expect(res.status).toBe(202);
+    const job = await settled(ALICE, (await readJson(res)).id);
+
+    expect((await as(BOB, 'GET', `/jobs/${job.id}`)).status).toBe(404);
+    expect((await readJson(await as(BOB, 'GET', '/jobs'))).map((j: { id: string }) => j.id)).not.toContain(job.id);
+    expect((await readJson(await as(ALICE, 'GET', '/jobs'))).map((j: { id: string }) => j.id)).toContain(job.id);
+    // The document the job created belongs to Alice too.
+    expect((await as(BOB, 'GET', `/documents/${job.result.id}`)).status).toBe(404);
+  });
+
+  it('re-indexes only the caller\'s own documents', async () => {
+    const before = (await readJson(await as(BOB, 'GET', '/documents'))).length;
+    await mine(ALICE, 'Alice extra', 'Another document owned by Alice for the re-index test.');
+    await mine(BOB, 'Bob extra', 'Another document owned by Bob for the re-index test.');
+
+    const report = await readJson(await as(BOB, 'POST', '/documents/reindex'));
+
+    expect(report.reindexed).toBe(before + 1);
+  });
+
+  it('gives documents from before accounts to the default user, reachable by mapping a key to it', async () => {
+    const legacy = await mine(LEGACY, 'Pre-auth document', 'A document created before any accounts existed.');
+
+    expect((await readJson(await as(ALICE, 'GET', '/documents'))).map((d: { id: string }) => d.id)).not.toContain(legacy.id);
+    expect((await readJson(await as(LEGACY, 'GET', '/documents'))).map((d: { id: string }) => d.id)).toContain(legacy.id);
+  });
 });

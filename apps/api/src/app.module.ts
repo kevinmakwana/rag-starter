@@ -1,4 +1,7 @@
 import { Controller, Get, Inject, Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
+import { AuthGuard } from './auth/auth.guard';
+import { Public } from './auth/public.decorator';
 import { APP_CONFIG, AppConfig, loadConfig } from './config';
 import { DatabaseModule } from './database/database.module';
 import { DatabaseService } from './database/database.service';
@@ -16,6 +19,8 @@ class HealthController {
     @Inject(DocumentsService) private readonly documents: DocumentsService,
   ) {}
 
+  /** Open on purpose: load balancers and the web app call it before they have a key. */
+  @Public()
   @Get()
   async health() {
     await this.db.query('SELECT 1');
@@ -23,6 +28,7 @@ class HealthController {
     return {
       // "degraded" means some documents were embedded with a different model than the active one.
       status: mismatchedDocuments ? 'degraded' : 'ok',
+      authRequired: this.cfg.auth.keys.size > 0,
       embeddingModel: model,
       mismatchedDocuments,
       embeddingProvider: this.cfg.embeddingProvider,
@@ -47,5 +53,6 @@ class HealthController {
     QueryModule,
   ],
   controllers: [HealthController],
+  providers: [{ provide: APP_GUARD, useClass: AuthGuard }],
 })
 export class AppModule {}

@@ -10,6 +10,7 @@ import {
 import { createHash } from 'crypto';
 import { extname } from 'path';
 import { PoolClient } from 'pg';
+import { DEFAULT_OWNER } from '../auth/public.decorator';
 import { APP_CONFIG, AppConfig } from '../config';
 import { DatabaseService, toVector } from '../database/database.service';
 import { Chunk, chunkText, embeddingText } from '../ingestion/chunker';
@@ -34,6 +35,7 @@ interface DocumentRow {
   /** Only selected where needed: the full text can be large. NULL for documents indexed before it was stored. */
   content?: string | null;
   content_hash?: string | null;
+  owner_id?: string;
 }
 
 const SUMMARY_COLUMNS = 'id, title, source, char_count, chunk_count, created_at';
@@ -104,8 +106,11 @@ export class DocumentsService implements OnApplicationBootstrap {
     }
   }
 
-  private async findByHash(hash: string): Promise<DocumentRow | undefined> {
-    const { rows } = await this.db.query<DocumentRow>(`SELECT ${SUMMARY_COLUMNS} FROM documents WHERE content_hash = $1`, [hash]);
+  private async findByHash(hash: string, owner: string): Promise<DocumentRow | undefined> {
+    const { rows } = await this.db.query<DocumentRow>(
+      `SELECT ${SUMMARY_COLUMNS} FROM documents WHERE content_hash = $1 AND owner_id = $2`,
+      [hash, owner],
+    );
     return rows[0];
   }
 
@@ -141,12 +146,12 @@ export class DocumentsService implements OnApplicationBootstrap {
   }
 
   /** Index a document. Content that is already indexed returns the existing one (`duplicate: true`). */
-  async create(dto: CreateDocumentDto): Promise<DocumentSummary> {
+  async create(dto: CreateDocumentDto, owner = DEFAULT_OWNER): Promise<DocumentSummary> {
     const content = dto.content.trim();
     const chunks = this.chunk(content);
 
     const hash = hashContent(content);
-    const existing = await this.findByHash(hash);
+    const existing = await this.findByHash(hash, owner);
     if (existing) return toSummary(existing, true);
 
     const others = await this.otherModels();
@@ -164,11 +169,11 @@ export class DocumentsService implements OnApplicationBootstrap {
     const doc = await this.db.transaction(async (client) => {
       // The unique index on content_hash settles races between concurrent uploads.
       const { rows } = await client.query<DocumentRow>(
-        `INSERT INTO documents (title, source, char_count, chunk_count, content_hash, embedding_model, content)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (content_hash) DO NOTHING
+        `INSERT INTO documents (title, source, char_count, chunk_count, content_hash, embedding_model, content, owner_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (owner_id, content_hash) DO NOTHING
          RETURNING ${SUMMARY_COLUMNS}`,
-        [title, dto.source ?? 'paste', content.length, chunks.length, hash, this.embeddingId, content],
+        [title, dto.source ?? 'paste', content.length, chunks.length, hash, this.embeddingId, content, owner],
       );
       if (!rows[0]) return null;
       await this.insertChunks(client, rows[0].id, chunks, vectors);
@@ -176,7 +181,7 @@ export class DocumentsService implements OnApplicationBootstrap {
     });
 
     if (!doc) {
-      const winner = await this.findByHash(hash);
+      const winner = await this.findByHash(hash, owner);
       if (winner) return toSummary(winner, true);
       throw new Error('Document insert conflicted but no matching document was found');
     }
@@ -189,25 +194,26 @@ export class DocumentsService implements OnApplicationBootstrap {
    * Index an uploaded file: extract its text (throws ExtractionError for unreadable or unsupported
    * files), title it from its first heading or its file name, then index it like pasted text.
    */
-  async ingestFile(filename: string, buffer: Buffer): Promise<DocumentSummary> {
+  async ingestFile(filename: string, buffer: Buffer, owner = DEFAULT_OWNER): Promise<DocumentSummary> {
     const content = await extractText(filename, buffer);
     if (content.length > MAX_DOCUMENT_CHARS) throw new BadRequestException('File is too large');
     const ext = extname(filename).toLowerCase();
     const title = titleFrom(content, filename.slice(0, -ext.length) || filename);
-    return this.create({ title, content, source: filename });
+    return this.create({ title, content, source: filename }, owner);
   }
 
-  private async getRow(id: string): Promise<DocumentRow> {
+  /** Another user's document is reported as missing, not forbidden, so ids can't be probed. */
+  private async getRow(id: string, owner: string): Promise<DocumentRow> {
     const { rows } = await this.db.query<DocumentRow>(
-      `SELECT ${SUMMARY_COLUMNS}, content, content_hash FROM documents WHERE id = $1`,
-      [id],
+      `SELECT ${SUMMARY_COLUMNS}, owner_id, content, content_hash FROM documents WHERE id = $1 AND owner_id = $2`,
+      [id, owner],
     );
     if (!rows[0]) throw new NotFoundException(`Document ${id} not found`);
     return rows[0];
   }
 
-  async get(id: string): Promise<DocumentDetail> {
-    const row = await this.getRow(id);
+  async get(id: string, owner = DEFAULT_OWNER): Promise<DocumentDetail> {
+    const row = await this.getRow(id, owner);
     return { ...toSummary(row), content: row.content ?? null };
   }
 
@@ -219,7 +225,7 @@ export class DocumentsService implements OnApplicationBootstrap {
     const chunks = this.chunk(content);
     const hash = hashContent(content);
     if (hash !== current.content_hash) {
-      const other = await this.findByHash(hash);
+      const other = await this.findByHash(hash, current.owner_id ?? DEFAULT_OWNER);
       if (other && other.id !== current.id) {
         throw new ConflictException(`Identical content is already indexed as "${other.title}" (${other.id}).`);
       }
@@ -232,9 +238,9 @@ export class DocumentsService implements OnApplicationBootstrap {
         const { rows } = await client.query<DocumentRow>(
           `UPDATE documents
               SET title = $2, char_count = $3, chunk_count = $4, content_hash = $5, embedding_model = $6, content = $7
-            WHERE id = $1
+            WHERE id = $1 AND owner_id = $8
           RETURNING ${SUMMARY_COLUMNS}`,
-          [current.id, title, content.length, chunks.length, hash, this.embeddingId, content],
+          [current.id, title, content.length, chunks.length, hash, this.embeddingId, content, current.owner_id ?? DEFAULT_OWNER],
         );
         if (!rows[0]) return undefined; // deleted while we were embedding
         await client.query('DELETE FROM chunks WHERE document_id = $1', [current.id]);
@@ -255,19 +261,19 @@ export class DocumentsService implements OnApplicationBootstrap {
   }
 
   /** Change a document's title and/or text; either way it is re-embedded, as the title is part of what is embedded. */
-  async update(id: string, dto: UpdateDocumentDto): Promise<DocumentSummary> {
+  async update(id: string, dto: UpdateDocumentDto, owner = DEFAULT_OWNER): Promise<DocumentSummary> {
     if (dto.title === undefined && dto.content === undefined) {
       throw new BadRequestException('Send a new title, new content, or both');
     }
-    const current = await this.getRow(id);
+    const current = await this.getRow(id, owner);
     const content = dto.content !== undefined ? dto.content.trim() : current.content;
     if (content == null) throw new ConflictException(NO_SOURCE_TEXT);
     return this.rebuild(current, dto.title?.trim() ?? current.title, content);
   }
 
   /** Re-index one document from its stored text with the current chunking settings and embedding model. */
-  async reindex(id: string): Promise<DocumentSummary> {
-    const current = await this.getRow(id);
+  async reindex(id: string, owner = DEFAULT_OWNER): Promise<DocumentSummary> {
+    const current = await this.getRow(id, owner);
     if (current.content == null) throw new ConflictException(NO_SOURCE_TEXT);
     return this.rebuild(current, current.title, current.content);
   }
@@ -276,9 +282,13 @@ export class DocumentsService implements OnApplicationBootstrap {
    * Re-index every document, e.g. after switching embedding model. One bad document does not stop
    * the rest; documents without stored text are skipped, failures are reported.
    */
-  async reindexAll(onProgress?: (done: number, total: number) => Promise<void> | void): Promise<ReindexReport> {
+  async reindexAll(
+    owner = DEFAULT_OWNER,
+    onProgress?: (done: number, total: number) => Promise<void> | void,
+  ): Promise<ReindexReport> {
     const { rows } = await this.db.query<{ id: string; title: string; has_content: boolean }>(
-      'SELECT id, title, content IS NOT NULL AS has_content FROM documents ORDER BY created_at',
+      'SELECT id, title, content IS NOT NULL AS has_content FROM documents WHERE owner_id = $1 ORDER BY created_at',
+      [owner],
     );
     const report: ReindexReport = { reindexed: 0, skipped: [], failed: [] };
     await onProgress?.(0, rows.length);
@@ -290,7 +300,7 @@ export class DocumentsService implements OnApplicationBootstrap {
         continue;
       }
       try {
-        await this.reindex(row.id);
+        await this.reindex(row.id, owner);
         report.reindexed++;
       } catch (err) {
         this.logger.warn(`Re-indexing "${row.title}" failed: ${(err as Error).message}`);
@@ -301,15 +311,16 @@ export class DocumentsService implements OnApplicationBootstrap {
     return report;
   }
 
-  async list(): Promise<DocumentSummary[]> {
+  async list(owner = DEFAULT_OWNER): Promise<DocumentSummary[]> {
     const { rows } = await this.db.query<DocumentRow>(
-      `SELECT ${SUMMARY_COLUMNS} FROM documents ORDER BY created_at DESC`,
+      `SELECT ${SUMMARY_COLUMNS} FROM documents WHERE owner_id = $1 ORDER BY created_at DESC`,
+      [owner],
     );
     return rows.map((r) => toSummary(r));
   }
 
-  async remove(id: string): Promise<void> {
-    const { rowCount } = await this.db.query('DELETE FROM documents WHERE id = $1', [id]);
+  async remove(id: string, owner = DEFAULT_OWNER): Promise<void> {
+    const { rowCount } = await this.db.query('DELETE FROM documents WHERE id = $1 AND owner_id = $2', [id, owner]);
     if (!rowCount) throw new NotFoundException(`Document ${id} not found`);
   }
 }

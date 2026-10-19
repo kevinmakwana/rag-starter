@@ -1,4 +1,5 @@
 import { HttpException, Inject, Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
+import { DEFAULT_OWNER } from '../auth/public.decorator';
 import { APP_CONFIG, AppConfig } from '../config';
 import { DatabaseService } from '../database/database.service';
 import { DocumentsService } from '../documents/documents.service';
@@ -13,6 +14,7 @@ interface JobRow {
   title: string | null;
   payload: Record<string, unknown> | null;
   file: Buffer | null;
+  owner_id: string;
   result: unknown | null;
   error: string | null;
   progress_done: number;
@@ -102,25 +104,30 @@ export class JobsService implements OnApplicationBootstrap, OnModuleDestroy {
 
   async enqueue(
     kind: JobKind,
-    { title, payload, file }: { title: string; payload?: Record<string, unknown>; file?: Buffer },
+    { title, payload, file, owner = DEFAULT_OWNER }: { title: string; payload?: Record<string, unknown>; file?: Buffer; owner?: string },
   ): Promise<JobView> {
     const { rows } = await this.db.query<JobRow>(
-      `INSERT INTO ingestion_jobs (kind, title, payload, file) VALUES ($1, $2, $3, $4) RETURNING ${VIEW_COLUMNS}`,
-      [kind, title, payload ?? null, file ?? null],
+      `INSERT INTO ingestion_jobs (kind, title, payload, file, owner_id) VALUES ($1, $2, $3, $4, $5)
+       RETURNING ${VIEW_COLUMNS}`,
+      [kind, title, payload ?? null, file ?? null, owner],
     );
     this.kick();
     return toView(rows[0]);
   }
 
-  async get(id: string): Promise<JobView | undefined> {
-    const { rows } = await this.db.query<JobRow>(`SELECT ${VIEW_COLUMNS} FROM ingestion_jobs WHERE id = $1`, [id]);
+  /** Another user's job is reported as missing, not forbidden. */
+  async get(id: string, owner = DEFAULT_OWNER): Promise<JobView | undefined> {
+    const { rows } = await this.db.query<JobRow>(
+      `SELECT ${VIEW_COLUMNS} FROM ingestion_jobs WHERE id = $1 AND owner_id = $2`,
+      [id, owner],
+    );
     return rows[0] && toView(rows[0]);
   }
 
-  async list(limit = 50): Promise<JobView[]> {
+  async list(owner = DEFAULT_OWNER, limit = 50): Promise<JobView[]> {
     const { rows } = await this.db.query<JobRow>(
-      `SELECT ${VIEW_COLUMNS} FROM ingestion_jobs ORDER BY created_at DESC LIMIT $1`,
-      [limit],
+      `SELECT ${VIEW_COLUMNS} FROM ingestion_jobs WHERE owner_id = $1 ORDER BY created_at DESC LIMIT $2`,
+      [owner, limit],
     );
     return rows.map(toView);
   }
@@ -205,11 +212,11 @@ export class JobsService implements OnApplicationBootstrap, OnModuleDestroy {
   private async dispatch(job: JobRow): Promise<unknown> {
     switch (job.kind) {
       case 'ingest_text':
-        return this.documents.create(job.payload as never);
+        return this.documents.create(job.payload as never, job.owner_id);
       case 'ingest_file':
-        return this.documents.ingestFile(String(job.payload?.filename), job.file ?? Buffer.alloc(0));
+        return this.documents.ingestFile(String(job.payload?.filename), job.file ?? Buffer.alloc(0), job.owner_id);
       case 'reindex_all':
-        return this.documents.reindexAll((done, total) =>
+        return this.documents.reindexAll(job.owner_id, (done, total) =>
           this.db
             .query('UPDATE ingestion_jobs SET progress_done = $2, progress_total = $3 WHERE id = $1', [job.id, done, total])
             .then(() => undefined),

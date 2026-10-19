@@ -26,4 +26,4 @@ Verified: unit tests, SSE controller tests, typecheck, build, and the e2e suite 
 - [x] **PDF and DOCX ingestion.** Extractor interface with `.pdf` and `.docx` implementations.
 - [x] **Document update and re-index.** `PUT /documents/:id` and `POST /documents/:id/reindex`.
 - [x] **Background ingestion.** Return a job id immediately, with a status endpoint, so large uploads don't hold a request open.
-- [ ] **Auth and per-user document scoping.** API key auth, `owner_id` on documents, every query filtered by it.
+- [x] **Auth and per-user document scoping.** API key auth, `owner_id` on documents, every query filtered by it.
