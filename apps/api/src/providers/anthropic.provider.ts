@@ -7,6 +7,7 @@ export class AnthropicChatProvider implements ChatProvider {
   constructor(
     private readonly client: Anthropic,
     private readonly model: string,
+    private readonly maxTokens = 1024,
   ) {}
 
   /** Anthropic takes the system prompt as a separate field. */
@@ -18,7 +19,7 @@ export class AnthropicChatProvider implements ChatProvider {
     const turns = messages
       .filter((m) => m.role !== 'system')
       .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }));
-    return { model: this.model, max_tokens: 1024, temperature: 0.1, system, messages: turns };
+    return { model: this.model, max_tokens: this.maxTokens, temperature: 0.1, system, messages: turns };
   }
 
   async *stream(messages: ChatMessage[], signal?: AbortSignal): AsyncGenerator<string> {

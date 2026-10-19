@@ -18,3 +18,12 @@ Verified: unit tests, SSE controller tests, typecheck, build, and the e2e suite 
 - [x] **Improve the chunker.** Heading path (a lone document title is dropped from it), tables split between rows with the header repeated, lists split between items, lead-in sentences kept with their list, document title in the embedded text. Documents indexed earlier keep their old chunks until re-indexed.
 - [ ] **Token-based chunk sizing (deferred from the chunker item).** Needs a tokenizer dependency (model-specific), and changing what `CHUNK_SIZE` means would silently break existing configs; characters are a fair proxy for English prose. Revisit for code-heavy or non-English corpora, probably as an opt-in `CHUNK_UNIT`.
 - [x] **Loosen citation parsing.** Accepts `[1, 2]` and ranges (`[1-3]`), flags answers with no valid citation via `meta.citationsMissing`; the UI links list and range citations.
+
+## Phase 3: features
+
+- [x] **Batch chunk inserts.** One `unnest` insert per document instead of a query per chunk.
+- [x] **More providers.** OpenAI-compatible `baseURL` (Ollama, vLLM, etc.); configurable Anthropic `max_tokens`.
+- [x] **PDF and DOCX ingestion.** Extractor interface with `.pdf` and `.docx` implementations.
+- [x] **Document update and re-index.** `PUT /documents/:id` and `POST /documents/:id/reindex`.
+- [x] **Background ingestion.** Return a job id immediately, with a status endpoint, so large uploads don't hold a request open.
+- [x] **Auth and per-user document scoping.** API key auth, `owner_id` on documents, every query filtered by it.

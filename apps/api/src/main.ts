@@ -14,6 +14,14 @@ async function bootstrap() {
   app.useGlobalFilters(new ProviderErrorFilter());
   app.enableShutdownHooks();
 
+  if (cfg.auth.keys.size === 0) {
+    Logger.warn(
+      'Authentication is OFF: anyone who can reach this API can read, change and delete every document. ' +
+        'Set API_KEYS to require a key (see README).',
+      'Bootstrap',
+    );
+  }
+
   await app.listen(cfg.port);
   Logger.log(
     `API on http://localhost:${cfg.port} (embeddings: ${cfg.embeddingProvider}, chat: ${cfg.chatProvider})`,

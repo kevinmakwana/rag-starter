@@ -138,3 +138,37 @@ describe('embedding model tracking', () => {
     expect(status).toEqual({ model: 'mock/hashed-bow/64', mismatchedDocuments: 3 });
   });
 });
+
+describe('chunk insertion', () => {
+  const content = '# Guide\n\n## A\n\nalpha text\n\n## B\n\nbravo text\n\n## C\n\ncharlie text';
+
+  it('writes all chunks of a document in one statement, not one round-trip per chunk', async () => {
+    const db = fakeDb({ existing: null });
+    await new DocumentsService(cfg, new CountingEmbeddings(64), db).create({ title: 'Guide', content });
+
+    const inserts = db.calls.filter((c: { sql: string }) => /INSERT INTO chunks/.test(c.sql));
+    expect(inserts).toHaveLength(1);
+  });
+
+  it('passes aligned columns: ordinals, headings, contents and vectors', async () => {
+    const db = fakeDb({ existing: null });
+    await new DocumentsService(cfg, new CountingEmbeddings(64), db).create({ title: 'Guide', content });
+
+    const [, ordinals, headings, contents, vectors] = db.calls.find((c: { sql: string }) =>
+      /INSERT INTO chunks/.test(c.sql),
+    ).params;
+    expect(ordinals).toEqual([0, 1, 2]);
+    expect(headings).toEqual(['A', 'B', 'C']);
+    expect(contents).toEqual(['alpha text', 'bravo text', 'charlie text']);
+    expect(vectors).toHaveLength(3);
+    vectors.forEach((v: string) => expect(v).toMatch(/^\[.*\]$/));
+  });
+
+  it('keeps chunks without a heading as NULL', async () => {
+    const db = fakeDb({ existing: null });
+    await new DocumentsService(cfg, new CountingEmbeddings(64), db).create({ title: 'Plain', content: 'Just text.' });
+
+    const params = db.calls.find((c: { sql: string }) => /INSERT INTO chunks/.test(c.sql)).params;
+    expect(params[2]).toEqual([null]);
+  });
+});

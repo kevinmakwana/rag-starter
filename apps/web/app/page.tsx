@@ -1,7 +1,7 @@
 'use client';
 
 import { FormEvent, Fragment, useCallback, useEffect, useRef, useState } from 'react';
-import { api, DocumentSummary, Health, HistoryMessage, QueryResult } from '@/lib/api';
+import { api, apiKey, AuthError, DocumentSummary, Health, HistoryMessage, QueryResult } from '@/lib/api';
 
 /** How many past question/answer pairs are sent along so follow-ups make sense. */
 const HISTORY_TURNS = 3;
@@ -61,20 +61,34 @@ export default function Home() {
   const [pasteTitle, setPasteTitle] = useState('');
   const [pasteBody, setPasteBody] = useState('');
   const [busy, setBusy] = useState(false);
+  const [needsKey, setNeedsKey] = useState(false);
+  const [keyInput, setKeyInput] = useState('');
   const [notice, setNotice] = useState<{ kind: 'error' | 'ok'; text: string } | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const bottom = useRef<HTMLDivElement>(null);
+
+  /** A rejected key opens the key prompt; anything else is shown as a notice. */
+  const handleError = useCallback((err: unknown) => {
+    if (err instanceof AuthError) setNeedsKey(true);
+    else setNotice({ kind: 'error', text: (err as Error).message });
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
       setDocs(await api.listDocuments());
     } catch (err) {
-      setNotice({ kind: 'error', text: (err as Error).message });
+      handleError(err);
     }
-  }, []);
+  }, [handleError]);
 
   useEffect(() => {
-    api.health().then(setHealth).catch(() => setHealth(null));
+    api
+      .health()
+      .then((h) => {
+        setHealth(h);
+        if (h.authRequired && !apiKey.get()) setNeedsKey(true);
+      })
+      .catch(() => setHealth(null));
     refresh();
   }, [refresh]);
 
@@ -96,11 +110,50 @@ export default function Home() {
       await refresh();
       return true;
     } catch (err) {
-      setNotice({ kind: 'error', text: (err as Error).message });
+      handleError(err);
       return false;
     } finally {
       setBusy(false);
     }
+  };
+
+  const onReindexAll = async () => {
+    setBusy(true);
+    setNotice(null);
+    try {
+      const r = await api.reindexAll();
+      const problems = r.skipped.length + r.failed.length;
+      setNotice({
+        kind: problems ? 'error' : 'ok',
+        text:
+          `Re-indexed ${r.reindexed} document(s)` +
+          (problems ? `; ${problems} could not be re-indexed (${[...r.skipped, ...r.failed].map((d) => d.title).join(', ')}): upload those again.` : '.'),
+      });
+      await refresh();
+      api.health().then(setHealth).catch(() => setHealth(null));
+    } catch (err) {
+      handleError(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onSaveKey = (e: FormEvent) => {
+    e.preventDefault();
+    apiKey.set(keyInput.trim());
+    setKeyInput('');
+    setNeedsKey(false);
+    setNotice(null);
+    api.health().then(setHealth).catch(() => setHealth(null));
+    refresh();
+  };
+
+  const onSignOut = () => {
+    apiKey.set('');
+    setDocs([]);
+    setSelected(new Set());
+    setTurns([]);
+    setNeedsKey(true);
   };
 
   const onUpload = async (files: FileList | null) => {
@@ -129,7 +182,7 @@ export default function Home() {
       });
       await refresh();
     } catch (err) {
-      setNotice({ kind: 'error', text: (err as Error).message });
+      handleError(err);
     }
   };
 
@@ -165,6 +218,7 @@ export default function Home() {
       });
       update((turn) => ({ ...turn, result }));
     } catch (err) {
+      if (err instanceof AuthError) setNeedsKey(true);
       update((turn) => ({ ...turn, error: (err as Error).message }));
     } finally {
       setAsking(false);
@@ -183,9 +237,24 @@ export default function Home() {
           </p>
         </header>
 
+        {needsKey && (
+          <form className="paste" onSubmit={onSaveKey}>
+            <p className="notice error">This API needs an API key.</p>
+            <input
+              type="password"
+              placeholder="API key"
+              value={keyInput}
+              onChange={(e) => setKeyInput(e.target.value)}
+              autoComplete="off"
+              required
+            />
+            <button className="btn">Use this key</button>
+          </form>
+        )}
+
         <div className="actions">
           <button className="btn" disabled={busy} onClick={() => fileInput.current?.click()}>
-            Upload .md / .txt
+            Upload file
           </button>
           <button className="btn ghost" disabled={busy} onClick={() => setPasteOpen((o) => !o)}>
             {pasteOpen ? 'Cancel' : 'Paste text'}
@@ -193,7 +262,7 @@ export default function Home() {
           <input
             ref={fileInput}
             type="file"
-            accept=".md,.markdown,.txt"
+            accept=".md,.markdown,.txt,.pdf,.docx"
             multiple
             hidden
             onChange={(e) => onUpload(e.target.files)}
@@ -225,11 +294,21 @@ export default function Home() {
         {health && health.mismatchedDocuments > 0 && (
           <p className="notice error">
             {health.mismatchedDocuments} document(s) were indexed with a different embedding model than the active one
-            ({health.embeddingModel}). Search results will be unreliable until you re-index.
+            ({health.embeddingModel}). Search results will be unreliable until you re-index.{' '}
+            <button className="link" disabled={busy} onClick={onReindexAll}>
+              Re-index all
+            </button>
           </p>
         )}
 
         {notice && <p className={`notice ${notice.kind}`}>{notice.text}</p>}
+        {health?.authRequired && !needsKey && (
+          <p className="muted small">
+            <button className="link" onClick={onSignOut}>
+              Sign out
+            </button>
+          </p>
+        )}
 
         <h2>
           Documents <span className="muted">({docs.length})</span>

@@ -15,6 +15,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { Response } from 'express';
+import { CurrentUser } from '../auth/current-user.decorator';
 import { QueryResult, QueryService } from './query.service';
 import { formatSseEvent } from './sse';
 
@@ -61,8 +62,8 @@ export class QueryController {
 
   @Post()
   @HttpCode(200)
-  ask(@Body() dto: QueryDto): Promise<QueryResult> {
-    return this.query.ask(dto.question.trim(), dto.topK, dto.documentIds, dto.history);
+  ask(@Body() dto: QueryDto, @CurrentUser() owner: string): Promise<QueryResult> {
+    return this.query.ask(dto.question.trim(), dto.topK, dto.documentIds, dto.history, owner);
   }
 
   /**
@@ -71,7 +72,7 @@ export class QueryController {
    */
   @Post('stream')
   @HttpCode(200)
-  async stream(@Body() dto: QueryDto, @Res() res: Response): Promise<void> {
+  async stream(@Body() dto: QueryDto, @CurrentUser() owner: string, @Res() res: Response): Promise<void> {
     const abort = new AbortController();
     // Stop paying for tokens nobody is reading once the client goes away.
     res.on('close', () => {
@@ -86,6 +87,7 @@ export class QueryController {
         dto.documentIds,
         abort.signal,
         dto.history,
+        owner,
       )) {
         if (!opened) {
           opened = true;

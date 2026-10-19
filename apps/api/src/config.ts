@@ -1,5 +1,6 @@
 import { config as loadEnv } from 'dotenv';
 import { resolve } from 'path';
+import { hashKey, parseApiKeys } from './auth/api-keys';
 
 // Load the repo-root .env first, then a local one (local wins only for unset keys).
 loadEnv({ path: resolve(process.cwd(), '../../.env') });
@@ -25,12 +26,17 @@ export interface AppConfig {
   searchMode: SearchMode;
   /** Up to this many chunks, vector search is exact instead of using the approximate HNSW index (0 = always HNSW). */
   exactSearchMaxChunks: number;
+  /** Hash of each accepted API key -> its user. Empty means authentication is off. */
+  auth: { keys: Map<string, string> };
+  /** How many background ingestion jobs run at once. */
+  ingestConcurrency: number;
   /** `llm` reorders the retrieved passages with the chat model (one extra call per question). */
   reranker: RerankerName;
   /** How many previous chat messages are used to resolve follow-up questions (0 disables memory). */
   historyMessages: number;
-  openai: { apiKey?: string; embeddingModel: string; chatModel: string };
-  anthropic: { apiKey?: string; chatModel: string };
+  /** `baseUrl` points the OpenAI client at any OpenAI-compatible server (Ollama, vLLM, LM Studio, ...). */
+  openai: { apiKey?: string; baseUrl?: string; embeddingModel: string; chatModel: string };
+  anthropic: { apiKey?: string; chatModel: string; maxTokens: number };
 }
 
 function int(name: string, fallback: number): number {
@@ -63,16 +69,20 @@ export function loadConfig(): AppConfig {
     minScore: 0,
     searchMode: oneOf('SEARCH_MODE', ['vector', 'hybrid'] as const, 'hybrid'),
     exactSearchMaxChunks: int('EXACT_SEARCH_MAX_CHUNKS', 20000),
+    auth: { keys: new Map(parseApiKeys(process.env.API_KEYS).map(({ key, user }) => [hashKey(key), user])) },
+    ingestConcurrency: int('INGEST_CONCURRENCY', 2),
     reranker: oneOf('RERANKER', ['none', 'llm'] as const, 'none'),
     historyMessages: int('HISTORY_MESSAGES', 6),
     openai: {
       apiKey: process.env.OPENAI_API_KEY || undefined,
+      baseUrl: process.env.OPENAI_BASE_URL || undefined,
       embeddingModel: process.env.OPENAI_EMBEDDING_MODEL ?? 'text-embedding-3-small',
       chatModel: process.env.OPENAI_CHAT_MODEL ?? 'gpt-4o-mini',
     },
     anthropic: {
       apiKey: process.env.ANTHROPIC_API_KEY || undefined,
       chatModel: process.env.ANTHROPIC_CHAT_MODEL ?? 'claude-sonnet-4-5',
+      maxTokens: int('ANTHROPIC_MAX_TOKENS', 1024),
     },
   };
 
@@ -81,13 +91,20 @@ export function loadConfig(): AppConfig {
   cfg.minScore = rawMin ? Number(rawMin) : cfg.embeddingProvider === 'mock' ? 0.05 : 0.2;
 
   if (cfg.exactSearchMaxChunks < 0) throw new Error('EXACT_SEARCH_MAX_CHUNKS must be 0 or more');
+  if (!Number.isInteger(cfg.ingestConcurrency) || cfg.ingestConcurrency < 1) {
+    throw new Error('INGEST_CONCURRENCY must be a whole number of at least 1');
+  }
   if (cfg.historyMessages < 0) throw new Error('HISTORY_MESSAGES must be 0 or more');
   if (cfg.chunkOverlap >= cfg.chunkSize) {
     throw new Error('CHUNK_OVERLAP must be smaller than CHUNK_SIZE');
   }
   const needsOpenAI = cfg.embeddingProvider === 'openai' || cfg.chatProvider === 'openai';
-  if (needsOpenAI && !cfg.openai.apiKey) {
-    throw new Error('OPENAI_API_KEY is required when an OpenAI provider is selected');
+  // A self-hosted OpenAI-compatible server usually needs no key.
+  if (needsOpenAI && !cfg.openai.apiKey && !cfg.openai.baseUrl) {
+    throw new Error('OPENAI_API_KEY is required when an OpenAI provider is selected (or set OPENAI_BASE_URL)');
+  }
+  if (!Number.isInteger(cfg.anthropic.maxTokens) || cfg.anthropic.maxTokens <= 0) {
+    throw new Error('ANTHROPIC_MAX_TOKENS must be a positive whole number');
   }
   if (cfg.chatProvider === 'anthropic' && !cfg.anthropic.apiKey) {
     throw new Error('ANTHROPIC_API_KEY is required when CHAT_PROVIDER=anthropic');

@@ -1,6 +1,6 @@
 # RAG Starter
 
-A small, production-minded **retrieval-augmented generation** starter: upload Markdown or text, ask questions, and get answers that **cite the passages they came from**.
+A small, production-minded **retrieval-augmented generation** starter: upload Markdown, text, PDF or Word files, ask questions, and get answers that **cite the passages they came from**.
 
 **NestJS** API · **Next.js** chat UI · **Postgres + pgvector** · pluggable LLM providers (**OpenAI**, **Anthropic**, or an **offline mock** that needs no API key).
 
@@ -79,7 +79,7 @@ Once both servers are running, open the web app in your browser (http://localhos
 
 > In the default offline mode there is no AI model, so the answer is simply the best-matching passage from the documents, not a written reply. Add an OpenAI or Anthropic key (see below) to get fully written answers with citations.
 
-You can also add your own file with **Upload .md / .txt** (or paste text with **Paste text**) and ask questions about it.
+You can also add your own file with **Upload file** (or paste text with **Paste text**) and ask questions about it.
 
 ### Use a real LLM
 
@@ -98,9 +98,11 @@ OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
+**Self-hosted or other OpenAI-compatible servers** (Ollama, vLLM, LM Studio): keep `EMBEDDING_PROVIDER`/`CHAT_PROVIDER` on `openai`, set `OPENAI_BASE_URL` (for Ollama `http://localhost:11434/v1`), name your models in `OPENAI_EMBEDDING_MODEL`/`OPENAI_CHAT_MODEL`, and leave the key empty. Set `EMBEDDING_DIM` to the model's size (768 for `nomic-embed-text`); the API checks every returned vector against it and says so if they differ. `dimensions` is only sent to `text-embedding-3` models. `ANTHROPIC_MAX_TOKENS` (default 1024) caps the length of Claude's answers.
+
 `EMBEDDING_DIM` must match the embedding model (1536 for `text-embedding-3-small`). If you change it, drop the `chunks` table and re-ingest. The API refuses to start on a mismatch rather than failing at query time.
 
-> Switching from mock to OpenAI embeddings? (Also re-index after upgrading to the title-aware chunker if you want older documents to benefit.) Re-index: vectors from different models aren't comparable. Each document records the embedding model it was indexed with, so the API logs a warning at startup, reports `degraded` on `/health`, and refuses to add documents (409) while the index mixes models. Documents indexed before this was tracked have no recorded model and are not flagged. The quickest way is `docker compose down -v && npm run db:up && npm run seed`.
+> Switching from mock to OpenAI embeddings? (Also re-index after upgrading to the title-aware chunker if you want older documents to benefit.) Re-index: vectors from different models aren't comparable. Each document records the embedding model it was indexed with, so the API logs a warning at startup, reports `degraded` on `/health`, and refuses to add documents (409) while the index mixes models. Documents indexed before this was tracked have no recorded model and are not flagged. Call `POST /documents/reindex` (the web app shows a **Re-index all** button when it notices a mix). Documents indexed before source text was stored are skipped and must be uploaded again; a fresh start, `docker compose down -v && npm run db:up && npm run seed`, also works.
 
 ## API
 
@@ -109,7 +111,15 @@ ANTHROPIC_API_KEY=sk-ant-...
 | `GET` | `/health` | | DB check, active providers and embedding model; `status` is `degraded` if some documents were embedded with a different model |
 | `GET` | `/documents` | | List indexed documents |
 | `POST` | `/documents` | `{ title, content }` | Index pasted text (≤ 500k chars). Identical content is never indexed twice: you get the existing document back (`duplicate: true`, HTTP 200). Returns 409 if the index was built with a different embedding model |
-| `POST` | `/documents/upload` | multipart `file` | `.md`, `.markdown`, `.txt` (≤ 2 MB); first `# H1` becomes the title |
+| `POST` | `/documents/upload` | multipart `file` | `.md`, `.markdown`, `.txt`, `.pdf`, `.docx` (≤ 10 MB); first `# H1` becomes the title, else the file name. Word headings, lists and tables are kept as Markdown; unreadable, password-protected or scanned (no text layer, no OCR) files get a 400 that says why |
+| `GET` | `/documents/:id` | | The document with its full source text (`content` is `null` for documents indexed before text was stored) |
+| `PUT` | `/documents/:id` | `{ title?, content? }` | Change title and/or text; the document is re-chunked and re-embedded atomically (id and date kept). 409 if the new text duplicates another document |
+| `POST` | `/documents/:id/reindex` | | Re-index from the stored text with the current chunk settings and embedding model |
+| `POST` | `/documents/reindex` | | Re-index every document; returns `{ reindexed, skipped, failed }`. The fix after switching embedding model |
+| `POST` | `/jobs/documents` | `{ title, content }` | Same as `POST /documents` but in the background: answers `202` with a job |
+| `POST` | `/jobs/upload` | multipart `file` | Same as `POST /documents/upload`, extraction included, in the background (an unsupported file type is still a `400` straight away) |
+| `POST` | `/jobs/reindex` | | Re-index everything in the background, with progress |
+| `GET` | `/jobs/:id` | | `status` (`queued`, `running`, `succeeded`, `failed`), `progress`, and the `result` or `error`; `GET /jobs` lists recent jobs |
 | `DELETE` | `/documents/:id` | | Removes the document and its chunks |
 | `POST` | `/query` | `{ question, topK?, documentIds?, history? }` | Returns `answer`, `sources[]`, `meta` |
 | `POST` | `/query/stream` | same as `/query` | Server-Sent Events: `sources`, then `token`s, then `done` (the full result), or `error` |
@@ -164,7 +174,28 @@ samples/                  fictional docs to try it with
 
 All settings live in the root `.env` (see [`.env.example`](.env.example)): providers and models, `EMBEDDING_DIM`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `TOP_K`, `MIN_SCORE`, `SEARCH_MODE`, `EXACT_SEARCH_MAX_CHUNKS`, `RERANKER`, `HISTORY_MESSAGES`, ports and CORS.
 
+## Authentication and users
+
+Off by default so the quickstart just works; the API logs a warning at startup when it is. Set `API_KEYS` to turn it on:
+
+```bash
+API_KEYS=$(openssl rand -hex 24):alice,$(openssl rand -hex 24):bob   # key:user pairs
+curl -s localhost:4000/documents -H "Authorization: Bearer <alice's key>"    # or: -H "X-API-Key: <key>"
+```
+
+- Every route except `GET /health` then needs a key (`401` otherwise). Keys must be at least 16 characters, and a user may have several (for rotation). Only hashes of keys are kept in memory, and error messages never print one.
+- **Each user only ever sees their own documents and jobs**: lists, reads, edits, deletes, re-indexing, background jobs and, above all, search. Naming another user's document id in a query returns nothing, and another user's resources answer `404`, not `403`, so ids cannot be probed. Identical text uploaded by two users stays two documents (duplicates are detected per user).
+- Documents from before accounts existed, and everything created while auth is off, belong to the user `default`. After turning auth on, map a key to it (`<key>:default`) to keep access to them.
+- The web app asks for the key on first use and keeps it in this browser's `localStorage`; **Sign out** forgets it. Serve the API over HTTPS in production, since keys travel in a header.
+- This is access control for a shared deployment, not a full account system: there is no sign-up, per-key permissions or admin role. Switching the embedding model is index-wide, so each user must run **Re-index all** for their own documents. On a very large multi-tenant corpus, filtering by owner after an approximate (HNSW) search is slow; partition the table by owner instead.
+
+## Background jobs
+
+Slow work (parsing a big PDF, embedding hundreds of chunks, re-indexing everything) can run as a job instead of holding a request open. The queue is a Postgres table worked off inside the API process (`INGEST_CONCURRENCY`, default 2), so it needs no extra service. Queued jobs survive a restart; a job that was *running* when the server stopped is marked failed, not retried, because retrying a file that crashed the parser could loop forever. That recovery assumes a single API process (claiming jobs is safe with several; recovery would fail another instance's live jobs). Uploaded bytes and pasted text are deleted from the job row as soon as it finishes, and finished jobs are purged after 7 days. The web app uses jobs for uploads, pasted text and **Re-index all**.
+
 ## Retrieval details
+
+- **File formats:** `.pdf` goes through `unpdf` (PDF.js) and `.docx` through `mammoth`, whose HTML is converted to Markdown so headings, lists and tables reach the chunker. Extractors are small objects in `ingestion/extractors.ts`, so another format is one more entry. Files are parsed in-process, so only expose uploads to people you trust. `npm audit` lists `sprintf-js` (via `argparse` via `mammoth`) as moderate with no patched release; only mammoth's command-line script loads it, never the library code used here.
 
 - **Re-ranking** (`RERANKER=llm`): retrieval fetches three times as many passages, the chat model orders them in one extra call, and the top `TOP_K` are kept. Off by default; any failure falls back to the retrieval order.
 - **Exact search for small corpora:** HNSW is approximate, and entries of deleted chunks stay in the index until `VACUUM`. In testing, an index full of them returned no live rows at all, and at other times a full page of rows that were not the true nearest (it depends on the random graph, so it showed up on CI but not locally). Up to `EXACT_SEARCH_MAX_CHUNKS` chunks (default 20000, a few tens of milliseconds at most) vector search is therefore exact. Above that it uses the HNSW index and re-runs exactly if the index returns fewer rows than requested, but recall can still dip after large deletes until autovacuum catches up: vacuum regularly and consider raising `hnsw.ef_search` for big corpora.

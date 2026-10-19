@@ -57,6 +57,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     // Added after the first release: older databases get the column, their existing rows stay NULL
     // (a unique index allows many NULLs) and are simply never treated as duplicates.
     await this.query('ALTER TABLE documents ADD COLUMN IF NOT EXISTS content_hash text');
+    // The original text, so a document can be re-indexed or edited later. NULL for older documents.
+    await this.query('ALTER TABLE documents ADD COLUMN IF NOT EXISTS content text');
     // "provider/model/dimensions" of the embeddings; NULL for documents indexed before this was tracked.
     await this.query('ALTER TABLE documents ADD COLUMN IF NOT EXISTS embedding_model text');
     await this.query('CREATE UNIQUE INDEX IF NOT EXISTS documents_content_hash_idx ON documents(content_hash)');
@@ -69,6 +71,34 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         content     text NOT NULL,
         embedding   vector(${dim}) NOT NULL
       )`);
+    // Who a document belongs to. Documents from before accounts existed (and everything when
+    // authentication is off) belong to 'default'. Identical text from two users must stay two
+    // documents, so the content hash is unique per owner, not globally.
+    await this.query("ALTER TABLE documents ADD COLUMN IF NOT EXISTS owner_id text NOT NULL DEFAULT 'default'");
+    await this.query('CREATE UNIQUE INDEX IF NOT EXISTS documents_owner_hash_idx ON documents(owner_id, content_hash)');
+    await this.query('DROP INDEX IF EXISTS documents_content_hash_idx');
+    // Background ingestion queue (see jobs/). Payload and file are dropped once a job finishes.
+    await this.query(`
+      CREATE TABLE IF NOT EXISTS ingestion_jobs (
+        id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        kind           text NOT NULL,
+        status         text NOT NULL DEFAULT 'queued',
+        title          text,
+        payload        jsonb,
+        file           bytea,
+        owner_id       text NOT NULL DEFAULT 'default',
+        result         jsonb,
+        error          text,
+        progress_done  integer NOT NULL DEFAULT 0,
+        progress_total integer,
+        created_at     timestamptz NOT NULL DEFAULT now(),
+        started_at     timestamptz,
+        finished_at    timestamptz
+      )`);
+    await this.query("ALTER TABLE ingestion_jobs ADD COLUMN IF NOT EXISTS owner_id text NOT NULL DEFAULT 'default'");
+    await this.query(
+      "CREATE INDEX IF NOT EXISTS ingestion_jobs_queue_idx ON ingestion_jobs(created_at) WHERE status = 'queued'",
+    );
     await this.query('CREATE INDEX IF NOT EXISTS chunks_document_idx ON chunks(document_id)');
     // Full-text side of hybrid search. Generated, so it stays in sync with heading/content for free.
     await this.query(`

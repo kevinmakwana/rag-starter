@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { DEFAULT_OWNER } from '../auth/public.decorator';
 import { APP_CONFIG, AppConfig } from '../config';
 import { DatabaseService, toVector } from '../database/database.service';
 import { CHAT_PROVIDER, ChatProvider, EMBEDDING_PROVIDER, EmbeddingProvider } from '../providers/types';
@@ -83,12 +84,17 @@ export class QueryService {
    * index for ordering, while a document filter still uses its own btree). Above that the index is
    * used, and if it returns fewer rows than requested the query is re-run exactly.
    */
-  private async vectorSearch(vector: string, limit: number, documentIds?: string[]): Promise<RetrievedChunk[]> {
-    const params: unknown[] = [vector, limit];
-    let filter = '';
+  private async vectorSearch(
+    vector: string,
+    limit: number,
+    owner: string,
+    documentIds?: string[],
+  ): Promise<RetrievedChunk[]> {
+    const params: unknown[] = [vector, limit, owner];
+    let filter = 'WHERE d.owner_id = $3';
     if (documentIds?.length) {
       params.push(documentIds);
-      filter = 'WHERE c.document_id = ANY($3::uuid[])';
+      filter += ' AND c.document_id = ANY($4::uuid[])';
     }
     const run = async (orderBy: string): Promise<RetrievedChunk[]> => {
       const { rows } = await this.db.query<RetrievedChunk>(
@@ -119,15 +125,16 @@ export class QueryService {
     vector: string,
     question: string,
     limit: number,
+    owner: string,
     documentIds?: string[],
   ): Promise<RetrievedChunk[]> {
     const tsquery = toOrTsQuery(question);
     if (!tsquery) return [];
-    const params: unknown[] = [vector, limit, tsquery];
+    const params: unknown[] = [vector, limit, owner, tsquery];
     let filter = '';
     if (documentIds?.length) {
       params.push(documentIds);
-      filter = 'AND c.document_id = ANY($4::uuid[])';
+      filter = 'AND c.document_id = ANY($5::uuid[])';
     }
     const { rows } = await this.db.query<RetrievedChunk>(
       `SELECT c.id::text            AS "chunkId",
@@ -138,9 +145,10 @@ export class QueryService {
               1 - (c.embedding <=> $1::vector) AS score
          FROM chunks c
          JOIN documents d ON d.id = c.document_id
-        WHERE c.fts @@ to_tsquery('english', $3)
+        WHERE d.owner_id = $3
+          AND c.fts @@ to_tsquery('english', $4)
           ${filter}
-        ORDER BY ts_rank_cd(c.fts, to_tsquery('english', $3)) DESC, c.id
+        ORDER BY ts_rank_cd(c.fts, to_tsquery('english', $4)) DESC, c.id
         LIMIT $2`,
       params,
     );
@@ -153,7 +161,12 @@ export class QueryService {
    * embeddings blur. Either way chunks below MIN_SCORE (cosine) are dropped afterwards, so
    * a question the documents can't answer still retrieves nothing.
    */
-  async retrieve(question: string, topK: number, documentIds?: string[]): Promise<RetrievedChunk[]> {
+  async retrieve(
+    question: string,
+    topK: number,
+    documentIds?: string[],
+    owner = DEFAULT_OWNER,
+  ): Promise<RetrievedChunk[]> {
     const [embedding] = await this.embeddings.embed([question]);
     const vector = toVector(embedding);
 
@@ -163,12 +176,12 @@ export class QueryService {
     if (this.cfg.searchMode === 'hybrid') {
       const fetchLimit = Math.max(pool * 4, 20);
       const [semantic, lexical] = await Promise.all([
-        this.vectorSearch(vector, fetchLimit, documentIds),
-        this.lexicalSearch(vector, question, fetchLimit, documentIds),
+        this.vectorSearch(vector, fetchLimit, owner, documentIds),
+        this.lexicalSearch(vector, question, fetchLimit, owner, documentIds),
       ]);
       ranked = reciprocalRankFusion([semantic, lexical]).map((f) => f.item);
     } else {
-      ranked = await this.vectorSearch(vector, pool, documentIds);
+      ranked = await this.vectorSearch(vector, pool, owner, documentIds);
     }
     const candidates = ranked.filter((r) => r.score >= this.cfg.minScore).slice(0, pool);
     return (await this.reranker.rerank(question, candidates)).slice(0, topK);
@@ -228,10 +241,11 @@ export class QueryService {
     topK = this.cfg.topK,
     documentIds?: string[],
     history?: HistoryMessage[],
+    owner = DEFAULT_OWNER,
   ): Promise<QueryResult> {
     const started = Date.now();
     const searchQuestion = await this.standalone(question, history);
-    const chunks = await this.retrieve(searchQuestion, topK, documentIds);
+    const chunks = await this.retrieve(searchQuestion, topK, documentIds, owner);
 
     const answer = chunks.length
       ? await this.chat.complete(buildMessages(searchQuestion, chunks))
@@ -250,10 +264,11 @@ export class QueryService {
     documentIds?: string[],
     signal?: AbortSignal,
     history?: HistoryMessage[],
+    owner = DEFAULT_OWNER,
   ): AsyncGenerator<QueryStreamEvent> {
     const started = Date.now();
     const searchQuestion = await this.standalone(question, history);
-    const chunks = await this.retrieve(searchQuestion, topK, documentIds);
+    const chunks = await this.retrieve(searchQuestion, topK, documentIds, owner);
     yield { type: 'sources', sources: this.toSources(chunks) };
 
     let answer = '';
