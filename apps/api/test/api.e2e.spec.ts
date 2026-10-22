@@ -10,7 +10,8 @@ import { AddressInfo } from 'net';
 import { join, resolve } from 'path';
 import { Client } from 'pg';
 import { APP_CONFIG, AppConfig } from '../src/config';
-import { evaluate } from '../src/eval/evaluate';
+import { evaluate, evaluateAnswers } from '../src/eval/evaluate';
+import { Judge } from '../src/eval/judge';
 import { JobsService } from '../src/jobs/jobs.service';
 import { EMBEDDING_PROVIDER, EmbeddingProvider } from '../src/providers/types';
 import { QueryService } from '../src/query/query.service';
@@ -626,6 +627,28 @@ describeIfDb('API (e2e)', () => {
     expect(report.top1Rate).toBeGreaterThanOrEqual(0.95);
     expect(report.mrr).toBeGreaterThanOrEqual(0.98);
     expect(report.abstainRate).toBeGreaterThanOrEqual(0.3);
+  });
+
+  // The mock chat provider echoes the top passage with a [1] citation, so groundedness can't be judged
+  // offline (a stub judge stands in, and real judging is covered by the unit tests and `npm run eval -- --answers`).
+  // This guards the deterministic half: refuse when nothing relevant was retrieved, and cite when answering.
+  it('keeps the deterministic answer metrics above the baseline', async () => {
+    const ids = await indexSamples();
+    const dataset = await loadDataset();
+    const query = app.get(QueryService);
+    const everythingSupported: Judge = {
+      judge: async (_question, answer) => ({ claims: [{ claim: answer, supported: true }] }),
+    };
+
+    const report = await evaluateAnswers((question) => query.askWithPassages(question), everythingSupported, dataset);
+
+    await Promise.all(ids.map((id) => fetch(`${base}/documents/${id}`, { method: 'DELETE' })));
+    if (report.failures.length) console.log('answer failures:', JSON.stringify(report.failures, null, 1));
+    // The mock refuses exactly when retrieval returns nothing, so this tracks the abstain baseline (33%).
+    expect(report.refusalRate).toBeGreaterThanOrEqual(0.3);
+    expect(report.citationRate).toBe(1);
+    expect(report.wrongRefusals).toBe(0);
+    expect(report.unjudged).toBe(0);
   });
 
 });

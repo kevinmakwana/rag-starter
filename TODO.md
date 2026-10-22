@@ -32,7 +32,7 @@ Verified: unit tests, SSE controller tests, typecheck, build, and the e2e suite 
 
 Retrieval quality and answer quality:
 
-- [ ] **Answer-quality eval.** The eval set only measures retrieval (hit rate, MRR). Add a groundedness check (an LLM judge, or "is each citation supported by its chunk") to the eval script, guarded in the test suite with the mock provider.
+- [x] **Answer-quality eval.** The eval set only measures retrieval (hit rate, MRR). Add a groundedness check (an LLM judge, or "is each citation supported by its chunk") to the eval script, guarded in the test suite with the mock provider.
 - [ ] **Multilingual full-text search.** The `fts` column is hardcoded to the `'english'` configuration; make it configurable (or per-document) so hybrid search works for other languages.
 - [ ] **Metadata filters and tags.** Filter queries by tag, source or date, not only by `documentIds`.
 - [ ] **More ingestion sources.** HTML and URL ingestion as new extractors.
