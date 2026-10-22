@@ -34,8 +34,9 @@ export function buildJudgeMessages(question: string, answer: string, passages: R
   ];
 }
 
-/** The first `{...}` in the text that parses as JSON, skipping braces inside strings and non-JSON groups. */
-function firstJsonObject(text: string): unknown {
+/** Every `{...}` in the text that parses as JSON, in order, skipping braces inside strings and non-JSON groups. */
+function jsonObjects(text: string): unknown[] {
+  const found: unknown[] = [];
   for (let start = text.indexOf('{'); start !== -1; start = text.indexOf('{', start + 1)) {
     let depth = 0;
     let inString = false;
@@ -50,30 +51,36 @@ function firstJsonObject(text: string): unknown {
       else if (ch === '{') depth++;
       else if (ch === '}' && --depth === 0) {
         try {
-          return JSON.parse(text.slice(start, i + 1));
+          found.push(JSON.parse(text.slice(start, i + 1)));
+          start = i; // continue after this object, not inside it
         } catch {
-          break; // looked like an object but wasn't JSON; try the next opening brace
+          // looked like an object but wasn't JSON; try the next opening brace
         }
+        break;
       }
     }
   }
-  return undefined;
+  return found;
 }
 
 /**
- * Strict about shape, lenient about framing: take the first JSON object in the reply, keep only
- * `{claim: non-empty string, supported: boolean}` entries (a string like "yes" is dropped, never
- * coerced), and return null if nothing usable is left.
+ * Strict about shape, lenient about framing: take the last JSON object in the reply that has a `claims`
+ * array (a reasoning model's draft comes before its final verdict). Every entry must be
+ * `{claim: non-empty string, supported: boolean}`; if any is not, the whole verdict is unusable, since
+ * silently dropping the bad entry could turn a failing answer into a perfect score. A string like
+ * "yes" is never coerced. Returns null when nothing usable is left.
  */
 export function parseVerdict(reply: string): Verdict | null {
-  const parsed = firstJsonObject(reply) as { claims?: unknown } | undefined;
-  if (!parsed || !Array.isArray(parsed.claims)) return null;
+  const candidates = jsonObjects(reply).filter(
+    (o): o is { claims: unknown[] } => !!o && typeof o === 'object' && Array.isArray((o as { claims?: unknown }).claims),
+  );
+  const parsed = candidates[candidates.length - 1];
+  if (!parsed) return null;
   const claims: ClaimVerdict[] = [];
   for (const entry of parsed.claims) {
     const e = entry as Partial<ClaimVerdict> | null;
-    if (e && typeof e.claim === 'string' && e.claim.trim() && typeof e.supported === 'boolean') {
-      claims.push({ claim: e.claim.trim(), supported: e.supported });
-    }
+    if (!e || typeof e.claim !== 'string' || !e.claim.trim() || typeof e.supported !== 'boolean') return null;
+    claims.push({ claim: e.claim.trim(), supported: e.supported });
   }
   return claims.length ? { claims } : null;
 }

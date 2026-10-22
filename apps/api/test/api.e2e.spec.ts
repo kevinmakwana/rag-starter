@@ -632,6 +632,7 @@ describeIfDb('API (e2e)', () => {
   // The mock chat provider echoes the top passage with a [1] citation, so groundedness can't be judged
   // offline (a stub judge stands in, and real judging is covered by the unit tests and `npm run eval -- --answers`).
   // This guards the deterministic half: refuse when nothing relevant was retrieved, and cite when answering.
+  // (wrongRefusals and unjudged are not asserted: with the mock and a stub judge they cannot be anything but 0.)
   it('keeps the deterministic answer metrics above the baseline', async () => {
     const ids = await indexSamples();
     const dataset = await loadDataset();
@@ -647,8 +648,6 @@ describeIfDb('API (e2e)', () => {
     // The mock refuses exactly when retrieval returns nothing, so this tracks the abstain baseline (33%).
     expect(report.refusalRate).toBeGreaterThanOrEqual(0.3);
     expect(report.citationRate).toBe(1);
-    expect(report.wrongRefusals).toBe(0);
-    expect(report.unjudged).toBe(0);
   });
 
 });

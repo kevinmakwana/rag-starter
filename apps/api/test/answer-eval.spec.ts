@@ -4,6 +4,7 @@ import {
   evaluateAnswers,
   EvalCase,
   parseRate,
+  forTerminal,
   parseRateFlag,
 } from '../src/eval/evaluate';
 import type { Judge, Verdict } from '../src/eval/judge';
@@ -109,14 +110,21 @@ describe('evaluateAnswers', () => {
   it('lists what went wrong, with unsupported claims quoted', async () => {
     const report = await evaluateAnswers(ask, stubJudge().judge, dataset);
 
-    expect(report.failures.map((f) => [f.question, f.reason])).toEqual([
-      ['half grounded', 'unsupported'],
-      ['wrongly refuses', 'wrong-refusal'],
-      ['uncited', 'unsupported'],
-      ['should have refused', 'missed-refusal'],
+    const halfGrounded = report.failures.find((f) => f.question === 'half grounded')!;
+    expect(report.failures.map((f) => f.reason).sort()).toEqual(['missed-refusal', 'unsupported', 'unsupported', 'wrong-refusal']);
+    expect(halfGrounded.unsupported).toEqual(['Refunds take 5 days']);
+    expect(halfGrounded.answer).toBe('Monthly [1]. Refunds take 5 days [1].');
+  });
+
+  it('lists the worst answers first: refusal failures and fully unsupported answers before partly supported ones', async () => {
+    const report = await evaluateAnswers(ask, stubJudge().judge, dataset);
+
+    expect(report.failures.map((f) => f.question)).toEqual([
+      'wrongly refuses',
+      'uncited',
+      'should have refused',
+      'half grounded',
     ]);
-    expect(report.failures[0].unsupported).toEqual(['Refunds take 5 days']);
-    expect(report.failures[0].answer).toBe('Monthly [1]. Refunds take 5 days [1].');
   });
 
   it('does not call it a wrong refusal when retrieval itself missed', async () => {
@@ -159,6 +167,40 @@ describe('evaluateAnswers', () => {
     await expect(evaluateAnswers(failing, stubJudge().judge, dataset)).rejects.toThrow(
       'Answering "grounded" failed: 429 rate limited',
     );
+  });
+
+  it('keeps the original error as the cause and copes with non-Error throws', async () => {
+    const original = new Error('429 rate limited');
+    const error = await evaluateAnswers(
+      async () => {
+        throw original;
+      },
+      stubJudge().judge,
+      dataset,
+    ).catch((e) => e);
+    expect(error.cause).toBe(original);
+
+    await expect(
+      evaluateAnswers(
+        async () => {
+          throw 'boom';
+        },
+        stubJudge().judge,
+        dataset,
+      ),
+    ).rejects.toThrow('Answering "grounded" failed: boom');
+  });
+});
+
+describe('forTerminal', () => {
+  it('collapses whitespace and replaces control characters, including escape sequences', () => {
+    expect(forTerminal('a\n\tb   c')).toBe('a b c');
+    expect(forTerminal('red \u001b[31mtext\u001b[0m\r\u0007done')).toBe('red [31mtext [0m done');
+    expect(forTerminal('\u009b2Jx')).toBe('2Jx');
+  });
+
+  it('truncates to the limit when given one', () => {
+    expect(forTerminal('abcdef', 3)).toBe('abc');
   });
 });
 

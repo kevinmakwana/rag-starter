@@ -38,18 +38,29 @@ describe('parseVerdict', () => {
     expect(parseVerdict(tricky)).toEqual({ claims: [{ claim: 'Config is {"a": 1} by default', supported: true }] });
   });
 
-  it('drops entries with the wrong shape instead of coercing them', () => {
-    const reply = JSON.stringify({
-      claims: [
-        { claim: 'kept', supported: false },
-        { claim: 'string flag', supported: 'yes' },
-        { claim: '   ', supported: true },
-        { supported: true },
-        null,
-        'a string',
-      ],
-    });
-    expect(parseVerdict(reply)).toEqual({ claims: [{ claim: 'kept', supported: false }] });
+  it('treats a verdict with any malformed entry as unusable instead of scoring what is left', () => {
+    const entries: unknown[] = [
+      { claim: 'string flag', supported: 'yes' },
+      { claim: '   ', supported: true },
+      { supported: true },
+      null,
+      'a string',
+    ];
+    for (const bad of entries) {
+      const reply = JSON.stringify({ claims: [{ claim: 'kept', supported: true }, bad] });
+      expect(parseVerdict(reply)).toBeNull();
+    }
+  });
+
+  it('skips objects without a claims array, so a draft before the final verdict is ignored', () => {
+    const reply = `<think>{"note": "checking"}</think>${json}`;
+    expect(parseVerdict(reply)?.claims).toHaveLength(2);
+  });
+
+  it('takes the last verdict when a draft verdict precedes the final one', () => {
+    const draft = '{"claims":[{"claim":"draft","supported":false}]}';
+    const final = '{"claims":[{"claim":"final","supported":true}]}';
+    expect(parseVerdict(`<think>${draft}</think>${final}`)).toEqual({ claims: [{ claim: 'final', supported: true }] });
   });
 
   it('returns null when nothing usable remains', () => {

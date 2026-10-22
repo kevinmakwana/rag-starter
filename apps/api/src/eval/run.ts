@@ -7,7 +7,7 @@ import { titleFrom } from '../documents/documents.dto';
 import { DocumentsService } from '../documents/documents.service';
 import { CHAT_PROVIDER, ChatProvider } from '../providers/types';
 import { QueryService } from '../query/query.service';
-import { answerThresholdsMissed, evaluate, evaluateAnswers, EvalCase, parseRateFlag } from './evaluate';
+import { answerThresholdsMissed, evaluate, evaluateAnswers, EvalCase, forTerminal, parseRateFlag } from './evaluate';
 import { LlmJudge } from './judge';
 
 /**
@@ -81,11 +81,11 @@ async function main() {
       console.log(`  wrong refusals  ${pct(answerReport.wrongRefusals)}  (refused although the right passage was retrieved)`);
       console.log(`  refusal         ${pct(answerReport.refusalRate)}  (${answerReport.unanswerable} unanswerable questions)`);
       if (answerReport.unjudged) {
-        console.log(`  unjudged        ${answerReport.unjudged}  (judge failed; not scored): ${answerReport.unjudgedQuestions.join(' | ')}`);
+        console.log(`  unjudged        ${answerReport.unjudged}  (judge failed; not scored): ${answerReport.unjudgedQuestions.map((q) => forTerminal(q)).join(' | ')}`);
       }
       for (const f of answerReport.failures) {
-        console.log(`  ✗ [${f.reason}] ${f.question}\n      answer: ${f.answer.replace(/\s+/g, ' ').slice(0, 200)}`);
-        for (const claim of f.unsupported) console.log(`      unsupported: ${claim}`);
+        console.log(`  ✗ [${f.reason}] ${forTerminal(f.question)}\n      answer: ${forTerminal(f.answer, 200)}`);
+        for (const claim of f.unsupported) console.log(`      unsupported: ${forTerminal(claim, 200)}`);
       }
 
       const missed = answerThresholdsMissed(answerReport, { minGrounded, minRefusal });

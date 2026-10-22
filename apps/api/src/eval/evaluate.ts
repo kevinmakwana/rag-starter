@@ -133,7 +133,7 @@ export async function evaluateAnswers(
   const cited: number[] = [];
   const wrongRefusals: number[] = [];
   const refusals: number[] = [];
-  const failures: AnswerFailure[] = [];
+  const failures: { failure: AnswerFailure; score: number }[] = [];
   const unjudgedQuestions: string[] = [];
 
   for (const { question, expected } of dataset) {
@@ -141,14 +141,14 @@ export async function evaluateAnswers(
     try {
       asked = await ask(question);
     } catch (err) {
-      throw new Error(`Answering "${question}" failed: ${(err as Error).message}`);
+      throw new Error(`Answering "${question}" failed: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
     }
     const { result, passages } = asked;
     const refused = isRefusal(result.answer);
 
     if (expected.length === 0) {
       refusals.push(refused ? 1 : 0);
-      if (!refused) failures.push({ question, reason: 'missed-refusal', answer: result.answer, unsupported: [] });
+      if (!refused) failures.push({ failure: { question, reason: 'missed-refusal', answer: result.answer, unsupported: [] }, score: 0 });
       continue;
     }
 
@@ -156,7 +156,7 @@ export async function evaluateAnswers(
       const retrievedRelevant = passages.some((chunk) => expected.some((e) => isRelevant(chunk, e)));
       wrongRefusals.push(retrievedRelevant ? 1 : 0);
       if (retrievedRelevant) {
-        failures.push({ question, reason: 'wrong-refusal', answer: result.answer, unsupported: [] });
+        failures.push({ failure: { question, reason: 'wrong-refusal', answer: result.answer, unsupported: [] }, score: 0 });
       }
       continue;
     }
@@ -170,9 +170,12 @@ export async function evaluateAnswers(
       continue;
     }
     const unsupported = verdict.claims.filter((c) => !c.supported).map((c) => c.claim);
-    fractions.push((verdict.claims.length - unsupported.length) / verdict.claims.length);
+    const fraction = (verdict.claims.length - unsupported.length) / verdict.claims.length;
+    fractions.push(fraction);
     fully.push(unsupported.length === 0 ? 1 : 0);
-    if (unsupported.length) failures.push({ question, reason: 'unsupported', answer: result.answer, unsupported });
+    if (unsupported.length) {
+      failures.push({ failure: { question, reason: 'unsupported', answer: result.answer, unsupported }, score: fraction });
+    }
   }
 
   return {
@@ -186,8 +189,15 @@ export async function evaluateAnswers(
     citationRate: mean(cited),
     wrongRefusals: mean(wrongRefusals),
     refusalRate: mean(refusals),
-    failures,
+    // Worst first: a wrong or missed refusal counts as 0% right; ties keep dataset order (sort is stable).
+    failures: failures.sort((a, b) => a.score - b.score).map((f) => f.failure),
   };
+}
+
+/** Answers and claims are model output: make them safe and short to print (no escape sequences, one line). */
+export function forTerminal(text: string, max = Infinity): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[\u0000-\u001f\u007f-\u009f\s]+/g, ' ').trim().slice(0, max);
 }
 
 /** A `--min-*` flag value: absent, or a number from 0 to 1. Anything else is an error, not a skipped gate. */
