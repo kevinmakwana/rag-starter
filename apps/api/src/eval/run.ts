@@ -7,7 +7,7 @@ import { titleFrom } from '../documents/documents.dto';
 import { DocumentsService } from '../documents/documents.service';
 import { CHAT_PROVIDER, ChatProvider } from '../providers/types';
 import { QueryService } from '../query/query.service';
-import { answerThresholdsMissed, evaluate, evaluateAnswers, EvalCase, parseRate } from './evaluate';
+import { answerThresholdsMissed, evaluate, evaluateAnswers, EvalCase, parseRateFlag } from './evaluate';
 import { LlmJudge } from './judge';
 
 /**
@@ -26,7 +26,7 @@ function arg(name: string, fallback?: number): number | undefined {
 }
 
 const flag = (name: string): boolean => process.argv.includes(`--${name}`);
-const rate = (name: string) => parseRate(name, process.argv.find((a) => a.startsWith(`--${name}=`))?.split('=')[1]);
+const rate = (name: string) => parseRateFlag(name, process.argv);
 
 const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
 

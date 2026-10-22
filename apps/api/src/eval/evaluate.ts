@@ -200,6 +200,18 @@ export function parseRate(name: string, raw: string | undefined): number | undef
   return n;
 }
 
+/**
+ * Read `--name=value` from argv. A bare `--name` (or `--name 0.9`) is an error: `--name=` is the only
+ * accepted form, and ignoring the other spellings would silently turn a CI gate off.
+ */
+export function parseRateFlag(name: string, argv: string[]): number | undefined {
+  if (argv.includes(`--${name}`)) {
+    throw new Error(`--${name} needs a value: use --${name}=0.9`);
+  }
+  const prefix = `--${name}=`;
+  return parseRate(name, argv.find((a) => a.startsWith(prefix))?.slice(prefix.length));
+}
+
 const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
 
 /** Human-readable list of the answer thresholds the report missed; empty when all are met. */
@@ -208,8 +220,13 @@ export function answerThresholdsMissed(
   { minGrounded, minRefusal }: { minGrounded?: number; minRefusal?: number },
 ): string[] {
   const missed: string[] = [];
-  if (minGrounded !== undefined && report.groundedness < minGrounded) {
-    missed.push(`groundedness ${pct(report.groundedness)} is below --min-grounded=${minGrounded}`);
+  // The reported groundedness leaves unjudged answers out, but the gate must not: a judge that fails
+  // on 20 of 21 answers would otherwise gate on the one that worked. So for the gate they count as 0.
+  const attempted = report.judged + report.unjudged;
+  const gated = attempted ? (report.groundedness * report.judged) / attempted : 0;
+  if (minGrounded !== undefined && gated < minGrounded) {
+    const note = report.unjudged ? ` (counting ${report.unjudged} unjudged answers as ungrounded)` : '';
+    missed.push(`groundedness ${pct(gated)} is below --min-grounded=${minGrounded}${note}`);
   }
   if (minRefusal !== undefined && report.refusalRate < minRefusal) {
     missed.push(`refusal rate ${pct(report.refusalRate)} is below --min-refusal=${minRefusal}`);

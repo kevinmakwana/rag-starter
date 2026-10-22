@@ -1,4 +1,11 @@
-import { answerThresholdsMissed, AnswerReport, evaluateAnswers, EvalCase, parseRate } from '../src/eval/evaluate';
+import {
+  answerThresholdsMissed,
+  AnswerReport,
+  evaluateAnswers,
+  EvalCase,
+  parseRate,
+  parseRateFlag,
+} from '../src/eval/evaluate';
 import type { Judge, Verdict } from '../src/eval/judge';
 import { RetrievedChunk } from '../src/query/prompt';
 import type { AnsweredQuestion, QueryResult } from '../src/query/query.service';
@@ -170,6 +177,24 @@ describe('parseRate', () => {
   });
 });
 
+describe('parseRateFlag', () => {
+  it('reads --name=value and ignores other arguments', () => {
+    expect(parseRateFlag('min-grounded', ['--answers', '--min-grounded=0.9', '--k=3'])).toBe(0.9);
+    expect(parseRateFlag('min-grounded', ['--answers'])).toBeUndefined();
+  });
+
+  it('rejects a bare flag or a space-separated value instead of silently skipping the gate', () => {
+    expect(() => parseRateFlag('min-grounded', ['--answers', '--min-grounded'])).toThrow(
+      /--min-grounded needs a value.*--min-grounded=0\.9/,
+    );
+    expect(() => parseRateFlag('min-grounded', ['--answers', '--min-grounded', '0.9'])).toThrow(/needs a value/);
+  });
+
+  it('still validates the value', () => {
+    expect(() => parseRateFlag('min-refusal', ['--min-refusal=1.5'])).toThrow(/--min-refusal must be a number/);
+  });
+});
+
 describe('answerThresholdsMissed', () => {
   const report = (over: Partial<AnswerReport>): AnswerReport => ({
     answerable: 1,
@@ -204,5 +229,21 @@ describe('answerThresholdsMissed', () => {
     const missed = answerThresholdsMissed(report({ judged: 0, unjudged: 3, groundedness: 0 }), { minGrounded: 0.5 });
 
     expect(missed).toHaveLength(1);
+  });
+
+  it('counts unjudged answers against the groundedness gate so a failing judge cannot pass it', () => {
+    // 1 of 21 answers judged (and fully supported): the reported 100% says nothing about the other 20.
+    const missed = answerThresholdsMissed(report({ judged: 1, unjudged: 20, groundedness: 1 }), { minGrounded: 0.9 });
+
+    expect(missed).toEqual([
+      'groundedness 4.8% is below --min-grounded=0.9 (counting 20 unjudged answers as ungrounded)',
+    ]);
+  });
+
+  it('only lowers the gate in proportion to how many answers went unjudged', () => {
+    const report20of21 = report({ judged: 20, unjudged: 1, groundedness: 1 });
+
+    expect(answerThresholdsMissed(report20of21, { minGrounded: 0.9 })).toEqual([]);
+    expect(answerThresholdsMissed(report20of21, { minGrounded: 0.96 })).toHaveLength(1);
   });
 });
