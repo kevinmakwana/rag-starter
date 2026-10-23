@@ -204,6 +204,19 @@ Slow work (parsing a big PDF, embedding hundreds of chunks, re-indexing everythi
 
 `eval/dataset.json` holds questions labelled with the section that answers them (and a few the documents can't answer). `npm run eval` reports hit@k, hit@1, MRR and how often unanswerable questions correctly retrieve nothing, against whatever providers `.env` selects. Run it with `SEARCH_MODE=vector` and `SEARCH_MODE=hybrid` to compare, and with a real embedding provider before trusting the numbers: the offline mock is word-based, so it flatters lexical search. The e2e suite fails if mock-mode quality drops below the recorded baseline.
 
+### Measuring answers
+
+`npm run eval -- --answers` also generates an answer for every question and scores it. The chat model acts as the judge: it splits each answer into claims and checks whether the passages that claim cites actually support it. It reports:
+
+- **grounded**: the mean share of supported claims, and **fully grounded**, the share of answers where every claim is supported.
+- **cited**: answers that cite at least one passage.
+- **wrong refusals**: "I don't know" even though retrieval found the right section. (A refusal after retrieval missed is a retrieval failure and shows up in the retrieval numbers instead. Answers retrieve `TOP_K` passages, so the two reports line up only when `--k` equals `TOP_K`.)
+- **refusal**: unanswerable questions that were correctly refused.
+
+Failing answers are listed with the unsupported claims quoted. `--min-grounded=0.9` and `--min-refusal=0.8` set the exit code like `--min-hit` does, and need `--answers`. If the judge errors or returns something unreadable, that answer is reported as *unjudged* and left out of the scores; the `--min-grounded` gate counts unjudged answers as ungrounded, so a judge that fails on most answers fails the gate rather than letting the few that worked pass it. Write the flags as `--min-grounded=0.9`; a bare `--min-grounded` or `--min-grounded 0.9` is an error, not a skipped gate.
+
+Caveats: the judge is the same model that wrote the answers, which tends to be lenient, so treat the score as a regression signal rather than an absolute measure. Judging is not deterministic, so compare runs on the same provider and expect a little variance. It generates an answer for every question and judges each answer that is not a refusal, so a run makes one chat call per question plus one judge call per answered question (more with `RERANKER=llm`, which adds a call per question). With `CHAT_PROVIDER=mock` the groundedness number is meaningless; the e2e suite only guards the deterministic parts (refusals and citations).
+
 ## Testing
 
 ```bash

@@ -46,8 +46,12 @@ export function citedIndexes(answer: string, available: number): number[] {
   return [...seen];
 }
 
-/** The model declined to answer, which legitimately carries no citation. */
-export const isRefusal = (answer: string): boolean => /^\s*i\s+don'?t\s+know\b/i.test(answer);
+/**
+ * The model declined to answer, which legitimately carries no citation. "I don't know X, but ... [1]"
+ * is a partial answer, not a refusal: it cites a passage.
+ */
+export const isRefusal = (answer: string): boolean =>
+  /^\s*i\s+don['\u2019]?t\s+know\b/i.test(answer) && citedIndexes(answer, Number.MAX_SAFE_INTEGER).length === 0;
 
 /** A previous turn of the conversation, as sent by the client. */
 export interface HistoryMessage {

@@ -27,3 +27,27 @@ Verified: unit tests, SSE controller tests, typecheck, build, and the e2e suite 
 - [x] **Document update and re-index.** `PUT /documents/:id` and `POST /documents/:id/reindex`.
 - [x] **Background ingestion.** Return a job id immediately, with a status endpoint, so large uploads don't hold a request open.
 - [x] **Auth and per-user document scoping.** API key auth, `owner_id` on documents, every query filtered by it.
+
+## Phase 4: quality, deployment, product
+
+Retrieval quality and answer quality:
+
+- [x] **Answer-quality eval.** The eval set only measures retrieval (hit rate, MRR). Add a groundedness check (an LLM judge, or "is each citation supported by its chunk") to the eval script, guarded in the test suite with the mock provider.
+- [ ] **Multilingual full-text search.** The `fts` column is hardcoded to the `'english'` configuration; make it configurable (or per-document) so hybrid search works for other languages.
+- [ ] **Metadata filters and tags.** Filter queries by tag, source or date, not only by `documentIds`.
+- [ ] **More ingestion sources.** HTML and URL ingestion as new extractors.
+- [ ] **Token-based chunk sizing (carried over from Phase 2).** See above; opt-in `CHUNK_UNIT`.
+
+Deployment and operations:
+
+- [ ] **Dockerfiles and a full compose stack.** `docker-compose.yml` only runs Postgres today; add images for the API and web app so the whole stack starts with one command.
+- [ ] **Rate limiting.** Per-user limits on the query endpoints (each call costs LLM money), plus request size limits.
+- [ ] **Real migrations.** Replace the inline `ALTER ... IF NOT EXISTS` statements in `database.service.ts` with versioned migrations once the schema changes again.
+- [ ] **Observability.** Structured logs with request IDs, latency and token counts per query, optionally OpenTelemetry.
+- [ ] **OpenAPI docs.** Generate Swagger docs for the API.
+
+Product:
+
+- [ ] **Persisted conversations.** Store conversations server-side (scoped by owner) so chats can be listed and resumed.
+- [ ] **Answer feedback.** Thumbs up/down on answers, stored and usable as an input to the eval set.
+- [ ] **Document management in the UI.** Edit, re-index and view a single document from the web app.
