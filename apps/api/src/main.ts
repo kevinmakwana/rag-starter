@@ -1,17 +1,16 @@
 import 'reflect-metadata';
-import { Logger, ValidationPipe } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
-import { ProviderErrorFilter } from './common/provider-error.filter';
+import { configureApp } from './app.setup';
 import { APP_CONFIG, AppConfig } from './config';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
   const cfg = app.get<AppConfig>(APP_CONFIG);
 
-  app.enableCors({ origin: cfg.corsOrigin.split(',').map((o) => o.trim()) });
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
-  app.useGlobalFilters(new ProviderErrorFilter());
+  configureApp(app, cfg);
   app.enableShutdownHooks();
 
   if (cfg.auth.keys.size === 0) {
