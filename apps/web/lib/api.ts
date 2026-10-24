@@ -86,6 +86,15 @@ export const apiKey = {
 /** The API wants a key and this browser has none, or the one it has is wrong. */
 export class AuthError extends Error {}
 
+/** The API refused the request because this caller sent too many. */
+export class RateLimitError extends Error {}
+
+function rateLimited(res: Response): RateLimitError {
+  const seconds = Number(res.headers.get('retry-after'));
+  const wait = Number.isFinite(seconds) && seconds > 0 ? `Try again in ${Math.ceil(seconds)} seconds.` : 'Try again shortly.';
+  return new RateLimitError(`Too many requests. ${wait}`);
+}
+
 const withAuth = (init?: RequestInit): RequestInit => {
   const key = apiKey.get();
   return key ? { ...init, headers: { ...init?.headers, authorization: `Bearer ${key}` } } : (init ?? {});
@@ -99,6 +108,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(`Can't reach the API at ${API_URL}. Is it running?`);
   }
   if (res.status === 401) throw new AuthError('This API needs a valid API key.');
+  if (res.status === 429) throw rateLimited(res);
   if (!res.ok) {
     const body = await res.json().catch(() => null);
     const message = Array.isArray(body?.message) ? body.message.join(', ') : body?.message;
@@ -177,6 +187,7 @@ async function queryStream(
     throw new Error(`Can't reach the API at ${API_URL}. Is it running?`);
   }
   if (res.status === 401) throw new AuthError('This API needs a valid API key.');
+  if (res.status === 429) throw rateLimited(res);
   if (!res.ok || !res.body) {
     const body = await res.json().catch(() => null);
     const message = Array.isArray(body?.message) ? body.message.join(', ') : body?.message;
