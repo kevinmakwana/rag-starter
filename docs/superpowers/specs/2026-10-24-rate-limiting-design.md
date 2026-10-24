@@ -1,0 +1,132 @@
+# Rate limiting and request size limits: design
+
+Status: approved in conversation 2026-10-24, awaiting review of this written spec.
+
+## Why
+
+Every query costs model money (a chat call, plus rerank and rewrite calls when enabled), and every
+document write costs an embedding call. Today any caller can send unlimited requests. The project is
+heading for a public live demo (see "Live demo" below), where that is a direct risk to the owner's
+bill. This spec covers the per-caller request limits and the request-size gap; it does not cover the
+demo mode itself.
+
+## Understanding
+
+- **Goal:** a caller who sends too many requests gets `429` with a hint when to retry, and cannot
+  run up model cost or starve other callers.
+- **Success:** limits are on by default, configurable by env, exempt `/health`, and tested end to end
+  with low limits. The web app shows a readable message instead of "Request failed".
+- **Constraints:** single API process today (the compose stack runs one), counters in memory, no new
+  database table, quickstart (no API keys, mock providers) keeps working.
+- **Assumptions the user confirmed:** in-memory storage; the caller is the user id when API keys are
+  configured and the client IP when they are not.
+
+## Decisions
+
+### Library
+
+Use `@nestjs/throttler` 6.7.1 (peer range includes NestJS 12; default storage is in memory). Subclass
+its `ThrottlerGuard` to supply the caller identity. Rejected: a hand-rolled guard, which would mean
+owning window logic, stale-entry cleanup and header handling for no benefit.
+
+### Two tiers
+
+| Tier | Applies to | Default | Env |
+|---|---|---|---|
+| general | every route except exempt ones | 300 / minute | `RATE_LIMIT_PER_MIN` |
+| costly | `POST /query`, `POST /query/stream`, `POST /documents`, `PUT /documents/:id`, `POST /documents/upload`, `POST /documents/reindex`, `POST /documents/:id/reindex`, `POST /jobs/documents`, `POST /jobs/upload`, `POST /jobs/reindex` | 20 / minute | `RATE_LIMIT_COSTLY_PER_MIN` |
+
+- A costly request counts against both tiers; the costly limit is the lower one in practice.
+- `0` turns a tier off. A negative or non-integer value is a startup error, like the other config.
+- Routes are marked with a `@Costly()` decorator (metadata, same style as `@Public()`), so the tier
+  of a route is visible where the route is defined.
+- Windows are 60 seconds. The numbers are defaults, chosen so the web app's job-status polling and
+  normal browsing stay well under the general limit.
+
+### Who is a caller
+
+- API keys configured: the user id that `AuthGuard` put on `request.user`. The throttler guard must
+  therefore run **after** `AuthGuard` (provider registration order).
+- No API keys: the client IP (`request.ip`).
+- New `TRUST_PROXY` env: unset or `false` (default), `true`, or a whole number of proxy hops. It is
+  passed to Express (`trust proxy`) so `request.ip` is the real client behind a reverse proxy. If it
+  is forgotten behind a proxy, all clients share the proxy's IP, which over-throttles rather than
+  under-throttles. The README says so. Invalid values are a startup error.
+
+### Exempt routes
+
+Routes marked `@Public()` (today only `/health`) are not throttled.
+
+### Response
+
+`429 Too Many Requests` with the standard JSON error body and a `Retry-After` header in seconds
+(provided by the throttler). Because the guard runs before the handler, `POST /query/stream` answers
+with a plain JSON 429 and never opens an SSE stream.
+
+### Web app
+
+`apps/web/lib/api.ts` has two request paths (JSON and stream), each currently turning a non-OK status
+into a generic error. Both map `429` to a `RateLimitError` whose message is
+"Too many requests. Try again in N seconds." (N from `Retry-After`, with a generic fallback when the
+header is missing).
+
+### Request size limits
+
+Question (2000), history (20 x 4000), uploads (10 MB) and document content (500,000 characters) are
+already capped by validation. One gap: Nest's default JSON body limit is 100 kB, which is smaller than
+the 500,000-character document cap, so a large JSON create likely gets `413` before validation can
+answer. The plan starts with a failing test that reproduces this, then sets an explicit JSON body
+limit that fits `MAX_DOCUMENT_CHARS` with room for JSON escaping. If the test shows the default does
+not actually reject, the plan records that and drops the change.
+
+## Components
+
+- `apps/api/src/rate-limit/costly.decorator.ts`: `@Costly()`.
+- `apps/api/src/rate-limit/app-throttler.guard.ts`: `AppThrottlerGuard extends ThrottlerGuard`;
+  `getTracker` returns user id or IP; skips `@Public()` routes.
+- `apps/api/src/rate-limit/rate-limit.module.ts` (or equivalent wiring in `AppModule`):
+  `ThrottlerModule.forRootAsync` reading `APP_CONFIG`, two named throttlers (`general`, `costly`),
+  the `costly` one skipped for routes without `@Costly()`, either one skipped when its limit is `0`.
+- `apps/api/src/config.ts`: `rateLimit: { perMinute, costlyPerMinute }`, `trustProxy`, with validation.
+- `apps/api/src/main.ts`: apply `trust proxy`, the JSON body limit.
+- `apps/web/lib/api.ts`: `RateLimitError` and the two mappings.
+- README section and `.env.example` entries.
+
+## Testing
+
+- **Config unit tests:** defaults, `0` disables, negative / fractional / non-numeric rejected,
+  `TRUST_PROXY` accepts `false`, `true`, whole numbers and rejects the rest.
+- **Tracker unit test:** user id wins when present; otherwise IP.
+- **E2E with tiny limits** (config overridden for the test app):
+  - the (N+1)th costly request returns `429` with a numeric `Retry-After`;
+  - two users do not share a bucket (auth on); two IPs do not share a bucket (auth off, via
+    `X-Forwarded-For` with `TRUST_PROXY` set);
+  - a costly request also consumes the general budget;
+  - `/health` is never limited;
+  - `POST /query/stream` over the limit gets JSON `429` with no `text/event-stream` content type;
+  - with a limit of `0` that tier never limits.
+- **Body limit test:** a JSON document create just under `MAX_DOCUMENT_CHARS` succeeds.
+- **Web:** a small unit test of the 429 mapping if `apps/web` has a test setup; otherwise covered by
+  manual check, noted in the PR.
+
+## Known limits (documented in the README)
+
+- Counters live in the API process memory: they reset on restart, and N instances allow N times the
+  limit. A shared store is a later change.
+- Failed authentication (`401`) is rejected by `AuthGuard` before the throttler runs, so wrong keys
+  are not counted. Keys are at least 16 characters, so guessing is impractical, and a flood of 401s
+  costs no model money.
+- No per-key custom limits and no daily token or spend budget. A spend cap at the model provider is
+  the backstop for a public deployment.
+
+## Live demo (next, separate specs)
+
+The user wants a live instance people can try. Rate limiting is one prerequisite. The others are
+tracked in TODO.md and each gets its own spec: demo mode (read-only visitors on preloaded sample
+documents), Dockerfiles and a full compose stack with the database bound to localhost, and a public
+deployment guide (HTTPS, `TRUST_PROXY`, provider spend cap).
+
+## Out of scope
+
+Shared (Postgres or Redis) counter storage, per-key limits, spend budgets, rate limiting of failed
+authentication, and the demo mode itself.
