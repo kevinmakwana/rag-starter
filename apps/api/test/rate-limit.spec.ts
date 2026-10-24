@@ -95,7 +95,7 @@ describe('rate limiting', () => {
     expect(limited.headers.get('content-type')).toMatch(/application\/json/);
     expect(Number(limited.headers.get('retry-after'))).toBeGreaterThanOrEqual(1);
     expect(Number(limited.headers.get('retry-after'))).toBeLessThanOrEqual(60);
-    expect((await limited.json()).statusCode).toBe(429);
+    expect(((await limited.json()) as { statusCode: number }).statusCode).toBe(429);
   });
 
   it('shares one costly budget across all costly routes, and leaves cheap routes alone', async () => {

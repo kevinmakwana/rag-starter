@@ -50,7 +50,7 @@ describe('JSON body limit', () => {
   it('accepts a document at the character cap, even when JSON escaping makes the body several times larger', async () => {
     const res = await post(true, '"'.repeat(MAX_DOCUMENT_CHARS));
     expect(res.status).toBe(201);
-    expect((await res.json()).chars).toBe(MAX_DOCUMENT_CHARS);
+    expect(((await res.json()) as { chars: number }).chars).toBe(MAX_DOCUMENT_CHARS);
   });
 
   it('still rejects a body far beyond the cap', async () => {
