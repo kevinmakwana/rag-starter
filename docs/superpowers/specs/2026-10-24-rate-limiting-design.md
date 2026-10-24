@@ -1,6 +1,6 @@
 # Rate limiting and request size limits: design
 
-Status: approved in conversation 2026-10-24, awaiting review of this written spec.
+Status: implemented. Written 2026-10-24; amended after implementation (see "Amendments").
 
 ## Why
 
@@ -25,9 +25,8 @@ demo mode itself.
 
 ### Library
 
-Use `@nestjs/throttler` 6.7.1 (peer range includes NestJS 12; default storage is in memory). Subclass
-its `ThrottlerGuard` to supply the caller identity. Rejected: a hand-rolled guard, which would mean
-owning window logic, stale-entry cleanup and header handling for no benefit.
+None. A small in-memory fixed-window `RateLimiter` plus a global `RateLimitGuard` (see Amendments for why
+`@nestjs/throttler`, the original choice, was dropped).
 
 ### Two tiers
 
@@ -45,7 +44,7 @@ owning window logic, stale-entry cleanup and header handling for no benefit.
 
 ### Who is a caller
 
-- API keys configured: the user id that `AuthGuard` put on `request.user`. The throttler guard must
+- API keys configured: the user id that `AuthGuard` put on `request.user`. The rate-limit guard must
   therefore run **after** `AuthGuard` (provider registration order).
 - No API keys: the client IP (`request.ip`).
 - New `TRUST_PROXY` env: unset or `false` (default), `true`, or a whole number of proxy hops. It is
@@ -59,8 +58,9 @@ Routes marked `@Public()` (today only `/health`) are not throttled.
 
 ### Response
 
-`429 Too Many Requests` with the standard JSON error body and a `Retry-After` header in seconds
-(provided by the throttler). Because the guard runs before the handler, `POST /query/stream` answers
+`429 Too Many Requests` with the standard JSON error body and a `Retry-After` header in whole seconds
+(the time left in the caller's window, at least 1). CORS exposes `Retry-After` so the browser app can
+read it. Because the guard runs before the handler, `POST /query/stream` answers
 with a plain JSON 429 and never opens an SSE stream.
 
 ### Web app
@@ -82,13 +82,15 @@ not actually reject, the plan records that and drops the change.
 ## Components
 
 - `apps/api/src/rate-limit/costly.decorator.ts`: `@Costly()`.
-- `apps/api/src/rate-limit/app-throttler.guard.ts`: `AppThrottlerGuard extends ThrottlerGuard`;
-  `getTracker` returns user id or IP; skips `@Public()` routes.
-- `apps/api/src/rate-limit/rate-limit.module.ts` (or equivalent wiring in `AppModule`):
-  `ThrottlerModule.forRootAsync` reading `APP_CONFIG`, two named throttlers (`general`, `costly`),
-  the `costly` one skipped for routes without `@Costly()`, either one skipped when its limit is `0`.
+- `apps/api/src/rate-limit/rate-limiter.ts`: `RateLimiter` (fixed window per key, idle keys swept at most
+  once a window) and `clientBucket()` (IPv4 as is, `::ffff:a.b.c.d` as the IPv4 address, other IPv6 by /64).
+- `apps/api/src/rate-limit/rate-limit.guard.ts`: `RateLimitGuard`; caller is the user id when API keys
+  are configured, else the client bucket; skips `@Public()` routes; counts every request against the
+  general tier and `@Costly()` ones also against the costly tier; sets `Retry-After` on refusal.
+- `apps/api/src/app.module.ts`: registers the guard after `AuthGuard`.
+- `apps/api/src/app.setup.ts`: `configureApp()` (CORS with exposed `Retry-After`, `trust proxy`, JSON body
+  limit, pipes, filters), shared by `main.ts` and the tests.
 - `apps/api/src/config.ts`: `rateLimit: { perMinute, costlyPerMinute }`, `trustProxy`, with validation.
-- `apps/api/src/main.ts`: apply `trust proxy`, the JSON body limit.
 - `apps/web/lib/api.ts`: `RateLimitError` and the two mappings.
 - README section and `.env.example` entries.
 
@@ -109,11 +111,24 @@ not actually reject, the plan records that and drops the change.
 - **Web:** a small unit test of the 429 mapping if `apps/web` has a test setup; otherwise covered by
   manual check, noted in the PR.
 
+## Amendments (found while implementing)
+
+- **No `@nestjs/throttler`.** NestJS 12 is ESM-only and the library is CommonJS. It works at runtime on
+  Node 22.12+ (`require` of ESM), but Jest in ESM mode cannot load it, so the real guard could not be
+  tested; installing it also split Nest into two versions (12.2.0 at the repo root, 12.1.2 in
+  `apps/api`) and broke the existing e2e suite. Since the tracker, the counter key and the
+  `Retry-After` header all needed overriding anyway (the library keys counters per route and names the
+  header `Retry-After-<tier>`), a ~60-line limiter costs less than the dependency.
+- **Fixed window, not sliding.** A caller can send up to twice the limit across a window boundary. That
+  protects a bill; it is not usage metering.
+- **IPv4-mapped IPv6.** Express reports IPv4 clients on a dual-stack socket as `::ffff:a.b.c.d`. Grouping
+  those by /64 would put every IPv4 client in one bucket, so they are mapped back to the IPv4 address.
+
 ## Known limits (documented in the README)
 
 - Counters live in the API process memory: they reset on restart, and N instances allow N times the
   limit. A shared store is a later change.
-- Failed authentication (`401`) is rejected by `AuthGuard` before the throttler runs, so wrong keys
+- Failed authentication (`401`) is rejected by `AuthGuard` before the limiter runs, so wrong keys
   are not counted. Keys are at least 16 characters, so guessing is impractical, and a flood of 401s
   costs no model money.
 - No per-key custom limits and no daily token or spend budget. A spend cap at the model provider is

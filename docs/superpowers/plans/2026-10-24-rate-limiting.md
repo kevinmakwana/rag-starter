@@ -10,6 +10,11 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-24-rate-limiting-design.md`
 
+> **Amendment (during execution):** `@nestjs/throttler` was dropped because Jest (ESM mode) cannot load a
+> CommonJS package that requires the ESM-only NestJS 12. Tasks 2 and 3 were implemented with an in-memory
+> `RateLimiter` and `RateLimitGuard` instead; the behaviour, tests and Task 1, 4 and 5 are as written. See
+> the spec's "Amendments" section.
+
 ## Global Constraints
 
 - Defaults: general `300` / minute (`RATE_LIMIT_PER_MIN`), costly `20` / minute (`RATE_LIMIT_COSTLY_PER_MIN`); window 60 seconds; `0` turns a tier off; negative, fractional or non-numeric values are startup errors naming the variable.
