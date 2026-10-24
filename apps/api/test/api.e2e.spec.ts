@@ -57,6 +57,9 @@ describeIfDb('API (e2e)', () => {
       EMBEDDING_PROVIDER: 'mock',
       CHAT_PROVIDER: 'mock',
       EMBEDDING_DIM: '256',
+      // This suite makes hundreds of calls from one address; rate limiting has its own spec.
+      RATE_LIMIT_PER_MIN: '0',
+      RATE_LIMIT_COSTLY_PER_MIN: '0',
     });
     // Tables here are tiny, so Postgres would scan them sequentially and never exercise the HNSW index.
     // Discourage that for the app's connections so index behaviour (e.g. filtered search) is what we test.

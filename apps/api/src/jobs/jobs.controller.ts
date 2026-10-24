@@ -14,6 +14,7 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { CurrentUser } from '../auth/current-user.decorator';
+import { Costly } from '../rate-limit/costly.decorator';
 import { CreateDocumentDto, MAX_UPLOAD_BYTES } from '../documents/documents.dto';
 import { isSupportedFile, SUPPORTED_EXTENSIONS } from '../ingestion/extractors';
 import { JobsService, JobView } from './jobs.service';
@@ -39,6 +40,7 @@ export class JobsController {
   }
 
   /** Index pasted text in the background. */
+  @Costly()
   @Post('documents')
   @HttpCode(202)
   indexText(@Body() dto: CreateDocumentDto, @CurrentUser() owner: string): Promise<JobView> {
@@ -46,6 +48,7 @@ export class JobsController {
   }
 
   /** Index an uploaded file in the background; text extraction happens in the job too. */
+  @Costly()
   @Post('upload')
   @HttpCode(202)
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES } }))
@@ -63,6 +66,7 @@ export class JobsController {
   }
 
   /** Re-index every document in the background (e.g. after switching embedding model). */
+  @Costly()
   @Post('reindex')
   @HttpCode(202)
   reindexAll(@CurrentUser() owner: string): Promise<JobView> {
