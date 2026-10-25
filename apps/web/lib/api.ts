@@ -87,12 +87,21 @@ export const apiKey = {
 export class AuthError extends Error {}
 
 /** The API refused the request because this caller sent too many. */
-export class RateLimitError extends Error {}
+export class RateLimitError extends Error {
+  constructor(
+    message: string,
+    /** Seconds the API asked the caller to wait, when it said. */
+    readonly retryAfterSeconds?: number,
+  ) {
+    super(message);
+  }
+}
 
 function rateLimited(res: Response): RateLimitError {
   const seconds = Number(res.headers.get('retry-after'));
-  const wait = Number.isFinite(seconds) && seconds > 0 ? `Try again in ${Math.ceil(seconds)} seconds.` : 'Try again shortly.';
-  return new RateLimitError(`Too many requests. ${wait}`);
+  const known = Number.isFinite(seconds) && seconds > 0;
+  const wait = known ? `Try again in ${Math.ceil(seconds)} seconds.` : 'Try again shortly.';
+  return new RateLimitError(`Too many requests. ${wait}`, known ? Math.ceil(seconds) : undefined);
 }
 
 const withAuth = (init?: RequestInit): RequestInit => {
@@ -147,12 +156,29 @@ async function* readSse(body: ReadableStream<Uint8Array>): AsyncGenerator<{ even
   }
 }
 
-/** Poll a background job until it finishes; resolves with its result or throws its error. */
+/** "a.md, b.md and 3 more": the files an upload run did not get to. */
+export function listNames(names: string[], max = 5): string {
+  return names.length <= max ? names.join(', ') : `${names.slice(0, max).join(', ')} and ${names.length - max} more`;
+}
+
+const MAX_RATE_LIMITED_POLLS = 30;
+
+/**
+ * Poll a background job until it finishes; resolves with its result or throws its error. A rate-limited
+ * poll says nothing about the job, which keeps running on the server, so wait as long as asked and ask again.
+ */
 async function waitForJob<T>(job: Job, intervalMs = 400): Promise<T> {
   let current = job;
+  let rateLimited = 0;
   while (current.status === 'queued' || current.status === 'running') {
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
-    current = await request<Job>(`/jobs/${current.id}`);
+    try {
+      current = await request<Job>(`/jobs/${current.id}`);
+      rateLimited = 0;
+    } catch (err) {
+      if (!(err instanceof RateLimitError) || ++rateLimited > MAX_RATE_LIMITED_POLLS) throw err;
+      await new Promise((resolve) => setTimeout(resolve, (err.retryAfterSeconds ?? 2) * 1000));
+    }
   }
   if (current.status === 'failed') throw new Error(current.error ?? 'The job failed.');
   return current.result as T;
