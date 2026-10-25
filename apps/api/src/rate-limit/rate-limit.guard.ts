@@ -1,3 +1,4 @@
+import { isIP } from 'net';
 import { CanActivate, ExecutionContext, HttpException, HttpStatus, Inject, Injectable } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { IS_PUBLIC } from '../auth/public.decorator';
@@ -42,8 +43,11 @@ export class RateLimitGuard implements CanActivate {
     return true;
   }
 
-  protected callerOf(req: { user?: { id?: string }; ip?: string }): string {
+  protected callerOf(req: { user?: { id?: string }; ip?: string; socket?: { remoteAddress?: string } }): string {
     if (this.cfg.auth.keys.size > 0 && req.user?.id) return `user:${req.user.id}`;
-    return `ip:${clientBucket(req.ip)}`;
+    // With `trust proxy` on, Express takes req.ip from X-Forwarded-For without checking that it is an address,
+    // so a client could invent a new bucket per request. Anything that is not an IP falls back to the socket.
+    const address = isIP(req.ip ?? '') ? req.ip : req.socket?.remoteAddress;
+    return `ip:${clientBucket(address)}`;
   }
 }

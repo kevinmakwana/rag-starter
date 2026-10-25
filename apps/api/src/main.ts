@@ -13,6 +13,14 @@ async function bootstrap() {
   configureApp(app, cfg);
   app.enableShutdownHooks();
 
+  if (cfg.trustProxy === true) {
+    Logger.warn(
+      'TRUST_PROXY=true trusts every X-Forwarded-For entry, so a client can choose its own rate-limit bucket ' +
+        'unless your proxy overwrites that header. Prefer the number of proxies in front of the API (TRUST_PROXY=1).',
+      'Bootstrap',
+    );
+  }
+
   if (cfg.auth.keys.size === 0) {
     Logger.warn(
       'Authentication is OFF: anyone who can reach this API can read, change and delete every document. ' +

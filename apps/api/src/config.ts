@@ -36,7 +36,10 @@ export interface AppConfig {
   historyMessages: number;
   /** Requests per minute per caller. `costlyPerMinute` also applies to routes that call a model. 0 = no limit. */
   rateLimit: { perMinute: number; costlyPerMinute: number };
-  /** Express `trust proxy`: `true`, or how many proxy hops to trust, so the client IP is the real one. */
+  /**
+   * Express `trust proxy`: how many proxy hops to trust so the client IP is the real one. Prefer a number:
+   * `true` believes the left-most X-Forwarded-For entry, which a client can choose when the proxy appends to it.
+   */
   trustProxy: boolean | number;
   /** `baseUrl` points the OpenAI client at any OpenAI-compatible server (Ollama, vLLM, LM Studio, ...). */
   openai: { apiKey?: string; baseUrl?: string; embeddingModel: string; chatModel: string };

@@ -164,12 +164,20 @@ describe('rate limiting', () => {
     expect((await call('POST', '/a', as(ALICE))).status).toBe(201);
   });
 
-  it('limits each client IP separately when authentication is off and a proxy is trusted', async () => {
+  it('limits each client IP separately when authentication is off, taking the address the trusted proxy added', async () => {
+    // One trusted hop: the proxy appends the real client address, so a first entry chosen by the client is ignored.
+    const call = await start({ costlyPerMinute: 1, trustProxy: 1 });
+
+    expect((await call('POST', '/a', { 'x-forwarded-for': '6.6.6.6, 1.1.1.1' })).status).toBe(201);
+    expect((await call('POST', '/a', { 'x-forwarded-for': '7.7.7.7, 1.1.1.1' })).status).toBe(429);
+    expect((await call('POST', '/a', { 'x-forwarded-for': '7.7.7.7, 2.2.2.2' })).status).toBe(201);
+  });
+
+  it('does not let a client pick its own bucket with a value that is not an address, even when every hop is trusted', async () => {
     const call = await start({ costlyPerMinute: 1, trustProxy: true });
 
-    expect((await call('POST', '/a', { 'x-forwarded-for': '1.1.1.1' })).status).toBe(201);
-    expect((await call('POST', '/a', { 'x-forwarded-for': '1.1.1.1' })).status).toBe(429);
-    expect((await call('POST', '/a', { 'x-forwarded-for': '2.2.2.2' })).status).toBe(201);
+    expect((await call('POST', '/a', { 'x-forwarded-for': 'garbage-1' })).status).toBe(201);
+    expect((await call('POST', '/a', { 'x-forwarded-for': 'garbage-2' })).status).toBe(429);
   });
 
   it('ignores X-Forwarded-For unless a proxy is trusted, so it cannot be spoofed to dodge the limit', async () => {
@@ -204,6 +212,12 @@ describe('RateLimitGuard caller', () => {
 
   it('is the client address when authentication is off, even though every request then has the default user', () => {
     expect(guard([]).callerOf({ user: { id: 'default' }, ip: '9.9.9.9' })).toBe('ip:9.9.9.9');
+  });
+
+  it('falls back to the socket address when req.ip is not an IP address, so a client cannot invent a bucket', () => {
+    const g = guard([]);
+    expect(g.callerOf({ ip: 'not-an-ip', socket: { remoteAddress: '9.9.9.9' } })).toBe('ip:9.9.9.9');
+    expect(g.callerOf({ ip: 'not-an-ip' })).toBe('ip:unknown');
   });
 
   it('puts an IPv4 client reported as ::ffff:a.b.c.d in its own bucket, not one shared by every IPv4 client', () => {

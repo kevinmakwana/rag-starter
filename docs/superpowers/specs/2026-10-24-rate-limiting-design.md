@@ -47,7 +47,10 @@ None. A small in-memory fixed-window `RateLimiter` plus a global `RateLimitGuard
 - API keys configured: the user id that `AuthGuard` put on `request.user`. The rate-limit guard must
   therefore run **after** `AuthGuard` (provider registration order).
 - No API keys: the client IP (`request.ip`).
-- New `TRUST_PROXY` env: unset or `false` (default), `true`, or a whole number of proxy hops. It is
+- New `TRUST_PROXY` env: unset or `false` (default), a whole number of proxy hops (recommended), or `true`
+  (discouraged: it believes the left-most `X-Forwarded-For` entry, which a client can choose when the proxy
+  appends to the header; the API warns at startup). A `req.ip` that is not an IP address, which `true` allows
+  through, falls back to the socket address so a client cannot invent buckets. It is
   passed to Express (`trust proxy`) so `request.ip` is the real client behind a reverse proxy. If it
   is forgotten behind a proxy, all clients share the proxy's IP, which over-throttles rather than
   under-throttles. The README says so. Invalid values are a startup error.

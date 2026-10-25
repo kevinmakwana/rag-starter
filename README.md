@@ -198,7 +198,7 @@ Every call to a model costs money, so requests are limited per caller: the user 
 
 Over the limit, the API answers `429` with a `Retry-After` header (seconds), and the web app says how long to wait. `0` turns a limit off.
 
-Known limits: counters live in the API process's memory, so they reset on restart, and running several API instances multiplies the limit. The window is fixed, so a caller can briefly send up to twice the limit across a window boundary. Wrong API keys are rejected before the limiter and are not counted (keys are at least 16 characters). Behind a reverse proxy set `TRUST_PROXY` (see `.env.example`), or every client shares the proxy's address. For a public deployment, also set a spend cap at your model provider as a backstop.
+Known limits: counters live in the API process's memory, so they reset on restart, and running several API instances multiplies the limit. The window is fixed, so a caller can briefly send up to twice the limit across a window boundary. Wrong API keys are rejected before the limiter and are not counted (keys are at least 16 characters). Behind a reverse proxy set `TRUST_PROXY` to the number of proxies in front of the API, usually `1` (see `.env.example`), or every client shares the proxy's address. Avoid `TRUST_PROXY=true`: most proxies append to a client-supplied `X-Forwarded-For`, so a client could choose its own address and dodge the limits (the API warns at startup). For a public deployment, also set a spend cap at your model provider as a backstop.
 
 ## Background jobs
 
