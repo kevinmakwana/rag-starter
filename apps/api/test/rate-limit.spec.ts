@@ -79,7 +79,8 @@ describe('rate limiting', () => {
     apps.push(app);
     const base = `http://127.0.0.1:${(app.getHttpServer().address() as AddressInfo).port}`;
     return (method: 'GET' | 'POST', path: string, headers: Record<string, string> = {}) =>
-      fetch(`${base}${path}`, { method, headers });
+      // No keep-alive: every test boots its own server, possibly on a port a previous one just freed.
+      fetch(`${base}${path}`, { method, headers: { connection: 'close', ...headers } });
   }
 
   const as = (key: string) => ({ authorization: `Bearer ${key}` });
