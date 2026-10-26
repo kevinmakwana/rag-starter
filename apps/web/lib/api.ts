@@ -88,19 +88,19 @@ export class AuthError extends Error {}
 
 /** The API refused the request because this caller sent too many. */
 export class RateLimitError extends Error {
-  constructor(
-    message: string,
-    /** Seconds the API asked the caller to wait, when it said. */
-    readonly retryAfterSeconds?: number,
-  ) {
+  /** Seconds the API asked the caller to wait, when it said. */
+  retryAfterSeconds?: number;
+
+  constructor(message: string, retryAfterSeconds?: number) {
     super(message);
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
 function rateLimited(res: Response): RateLimitError {
   const seconds = Number(res.headers.get('retry-after'));
   const known = Number.isFinite(seconds) && seconds > 0;
-  const wait = known ? `Try again in ${Math.ceil(seconds)} seconds.` : 'Try again shortly.';
+  const wait = known ? `Try again in ${Math.ceil(seconds)} ${Math.ceil(seconds) === 1 ? 'second' : 'seconds'}.` : 'Try again shortly.';
   return new RateLimitError(`Too many requests. ${wait}`, known ? Math.ceil(seconds) : undefined);
 }
 

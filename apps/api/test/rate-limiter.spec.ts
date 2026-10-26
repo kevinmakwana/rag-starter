@@ -1,4 +1,4 @@
-import { clientBucket, RateLimiter } from '../src/rate-limit/rate-limiter';
+import { clientBucket, RateLimiter, stripPort } from '../src/rate-limit/rate-limiter';
 
 describe('RateLimiter', () => {
   const clock = (start = 1_000_000) => {
@@ -52,6 +52,18 @@ describe('RateLimiter', () => {
     for (let i = 0; i < 1000; i++) expect(limiter.hit('k', 1).allowed).toBe(false);
   });
 
+  it('never tracks more than maxKeys callers: when full, the longest-tracked one is dropped', () => {
+    const limiter = new RateLimiter(60_000, clock().now, 3);
+    for (const key of ['a', 'b', 'c']) limiter.hit(key, 1);
+    expect(limiter.hit('a', 1).allowed).toBe(false);
+
+    limiter.hit('d', 1); // makes room by dropping 'a', the oldest
+
+    expect(limiter.size).toBe(3);
+    expect(limiter.hit('b', 1).allowed).toBe(false); // still tracked
+    expect(limiter.hit('a', 1).allowed).toBe(true); // forgotten, so it starts a fresh window
+  });
+
   it('forgets expired callers so memory does not grow with every address ever seen', () => {
     const time = clock();
     const limiter = new RateLimiter(60_000, time.now);
@@ -90,5 +102,25 @@ describe('clientBucket', () => {
   it('falls back to a fixed bucket when there is no address', () => {
     expect(clientBucket(undefined)).toBe('unknown');
     expect(clientBucket('')).toBe('unknown');
+  });
+});
+
+describe('stripPort', () => {
+  it('drops a port from an IPv4 or bracketed IPv6 entry and leaves anything else alone', () => {
+    expect(stripPort('1.2.3.4:5678')).toBe('1.2.3.4');
+    expect(stripPort('[2001:db8::1]:443')).toBe('2001:db8::1');
+    expect(stripPort('[2001:db8::1]')).toBe('2001:db8::1');
+    expect(stripPort('2001:db8::1')).toBe('2001:db8::1');
+    expect(stripPort('1.2.3.4')).toBe('1.2.3.4');
+    expect(stripPort('garbage:80')).toBe('garbage:80');
+    expect(stripPort(undefined)).toBeUndefined();
+  });
+});
+
+describe('clientBucket with an embedded IPv4 tail', () => {
+  it('groups by the /64 like any other IPv6 address, whatever the dotted tail', () => {
+    expect(clientBucket('64:ff9b::1.2.3.4')).toBe(clientBucket('64:ff9b::5.6.7.8'));
+    expect(clientBucket('64:ff9b::1.2.3.4')).not.toBe(clientBucket('64:ff9c::1.2.3.4'));
+    expect(clientBucket('::1.2.3.4')).toBe(clientBucket('::5.6.7.8'));
   });
 });

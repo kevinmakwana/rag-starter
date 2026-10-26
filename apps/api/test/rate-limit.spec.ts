@@ -157,7 +157,7 @@ describe('rate limiting', () => {
     expect((await call('POST', '/a', { ...as(BOB), 'x-forwarded-for': '2.2.2.2' })).status).toBe(429);
   });
 
-  it('rejects a wrong key with 401 before the throttler, and does not spend the budget', async () => {
+  it('rejects a wrong key with 401 before the limiter, and does not spend the budget', async () => {
     const call = await start({ costlyPerMinute: 1, keys: { [ALICE]: 'alice' } });
 
     expect((await call('POST', '/a', as('wrong-key-0123456789'))).status).toBe(401);
@@ -218,6 +218,12 @@ describe('RateLimitGuard caller', () => {
     const g = guard([]);
     expect(g.callerOf({ ip: 'not-an-ip', socket: { remoteAddress: '9.9.9.9' } })).toBe('ip:9.9.9.9');
     expect(g.callerOf({ ip: 'not-an-ip' })).toBe('ip:unknown');
+  });
+
+  it('reads the client from an entry that carries a port, as some proxies send', () => {
+    const g = guard([]);
+    expect(g.callerOf({ ip: '1.2.3.4:5678', socket: { remoteAddress: '9.9.9.9' } })).toBe('ip:1.2.3.4');
+    expect(g.callerOf({ ip: '[2001:db8::1]:443', socket: { remoteAddress: '9.9.9.9' } })).toBe('ip:2001:0db8:0000:0000::/64');
   });
 
   it('puts an IPv4 client reported as ::ffff:a.b.c.d in its own bucket, not one shared by every IPv4 client', () => {

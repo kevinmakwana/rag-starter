@@ -15,6 +15,8 @@ export class RateLimiter {
   constructor(
     private readonly windowMs = 60_000,
     private readonly now: () => number = Date.now,
+    /** Upper bound on tracked callers, so a flood of made-up addresses cannot grow the map without limit. */
+    private readonly maxKeys = 100_000,
   ) {}
 
   /** Records one request for `key` and says whether it is within `limit` for the current window. */
@@ -24,6 +26,8 @@ export class RateLimiter {
     let window = this.windows.get(key);
     if (!window || window.resetAt <= now) {
       window = { count: 0, resetAt: now + this.windowMs };
+      this.windows.delete(key);
+      this.makeRoom();
       this.windows.set(key, window);
     }
     window.count++;
@@ -36,12 +40,30 @@ export class RateLimiter {
     return this.windows.size;
   }
 
+  /** Still full after the sweep: drop the caller tracked longest (a Map iterates in insertion order). */
+  private makeRoom(): void {
+    while (this.windows.size >= this.maxKeys) {
+      const oldest = this.windows.keys().next();
+      if (oldest.done) return;
+      this.windows.delete(oldest.value);
+    }
+  }
+
   /** At most once a window, drop callers whose window has ended so the map does not grow forever. */
   private sweep(now: number): void {
     if (now - this.sweptAt < this.windowMs) return;
     this.sweptAt = now;
     for (const [key, window] of this.windows) if (window.resetAt <= now) this.windows.delete(key);
   }
+}
+
+/** `1.2.3.4:5678` and `[2001:db8::1]:443` (as some proxies write X-Forwarded-For) to the bare address. */
+export function stripPort(address: string | undefined): string | undefined {
+  if (!address) return address;
+  const bracketed = /^\[([^\]]+)\](?::\d+)?$/.exec(address);
+  if (bracketed) return bracketed[1];
+  const ipv4 = /^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/.exec(address);
+  return ipv4 ? ipv4[1] : address;
 }
 
 const IPV4_MAPPED = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i;

@@ -4,7 +4,7 @@ import { Reflector } from '@nestjs/core';
 import { IS_PUBLIC } from '../auth/public.decorator';
 import { APP_CONFIG, AppConfig } from '../config';
 import { IS_COSTLY } from './costly.decorator';
-import { clientBucket, RateLimiter } from './rate-limiter';
+import { clientBucket, RateLimiter, stripPort } from './rate-limiter';
 
 /**
  * Global guard, registered after AuthGuard: with API keys the caller is the user it identified. Without
@@ -47,7 +47,8 @@ export class RateLimitGuard implements CanActivate {
     if (this.cfg.auth.keys.size > 0 && req.user?.id) return `user:${req.user.id}`;
     // With `trust proxy` on, Express takes req.ip from X-Forwarded-For without checking that it is an address,
     // so a client could invent a new bucket per request. Anything that is not an IP falls back to the socket.
-    const address = isIP(req.ip ?? '') ? req.ip : req.socket?.remoteAddress;
+    const claimed = stripPort(req.ip);
+    const address = isIP(claimed ?? '') ? claimed : req.socket?.remoteAddress;
     return `ip:${clientBucket(address)}`;
   }
 }

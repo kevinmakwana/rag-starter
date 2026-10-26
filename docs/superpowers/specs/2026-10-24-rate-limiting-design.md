@@ -77,16 +77,18 @@ header is missing).
 
 Question (2000), history (20 x 4000), uploads (10 MB) and document content (500,000 characters) are
 already capped by validation. One gap: Nest's default JSON body limit is 100 kB, which is smaller than
-the 500,000-character document cap, so a large JSON create likely gets `413` before validation can
-answer. The plan starts with a failing test that reproduces this, then sets an explicit JSON body
-limit that fits `MAX_DOCUMENT_CHARS` with room for JSON escaping. If the test shows the default does
-not actually reject, the plan records that and drops the change.
+the 500,000-character document cap, so a large JSON create got `413` before validation could answer
+(`body-limit.spec.ts` reproduces it). The document routes (`/documents`, `/jobs/documents`) now take
+JSON bodies up to 4 MB, enough for the cap with worst-case JSON escaping. Every other route is limited
+to 512 kB: the largest valid question (2,000 characters plus 20 history messages of 4,000) is about
+490 kB when every character needs a six-byte escape. Body parsing runs before the guards, so a caller
+over the rate limit can still make the server parse a body up to these sizes; that costs CPU, not model money.
 
 ## Components
 
 - `apps/api/src/rate-limit/costly.decorator.ts`: `@Costly()`.
 - `apps/api/src/rate-limit/rate-limiter.ts`: `RateLimiter` (fixed window per key, idle keys swept at most
-  once a window) and `clientBucket()` (IPv4 as is, `::ffff:a.b.c.d` as the IPv4 address, other IPv6 by /64).
+  once a window, and never more than 100,000 callers: the longest-tracked is dropped) and `clientBucket()` (IPv4 as is, `::ffff:a.b.c.d` as the IPv4 address, other IPv6 by /64).
 - `apps/api/src/rate-limit/rate-limit.guard.ts`: `RateLimitGuard`; caller is the user id when API keys
   are configured, else the client bucket; skips `@Public()` routes; counts every request against the
   general tier and `@Costly()` ones also against the costly tier; sets `Retry-After` on refusal.
@@ -111,8 +113,8 @@ not actually reject, the plan records that and drops the change.
   - `POST /query/stream` over the limit gets JSON `429` with no `text/event-stream` content type;
   - with a limit of `0` that tier never limits.
 - **Body limit test:** a JSON document create just under `MAX_DOCUMENT_CHARS` succeeds.
-- **Web:** a small unit test of the 429 mapping if `apps/web` has a test setup; otherwise covered by
-  manual check, noted in the PR.
+- **Web:** `apps/web/test/api.test.mjs` (Node's built-in test runner, which runs the TypeScript in `lib/`
+  directly on Node 22.18+) covers the 429 mapping and job polling. The page's upload loop is checked in a browser.
 
 ## Amendments (found while implementing)
 

@@ -4,32 +4,32 @@ import { JobsController } from '../src/jobs/jobs.controller';
 import { QueryController } from '../src/query/query.controller';
 import { IS_COSTLY } from '../src/rate-limit/costly.decorator';
 
-const costly = (controller: { prototype: object }, handler: string): boolean =>
+/** Every route handler of a controller: the methods carrying a @Get/@Post/... decorator. */
+const routes = (controller: { prototype: object }): string[] =>
+  Object.getOwnPropertyNames(controller.prototype).filter(
+    (name) => name !== 'constructor' && Reflect.getMetadata('method', (controller.prototype as Record<string, object>)[name]) !== undefined,
+  );
+
+const marked = (controller: { prototype: object }, handler: string): boolean =>
   !!Reflect.getMetadata(IS_COSTLY, (controller.prototype as Record<string, object>)[handler]);
 
-describe('which routes are costly', () => {
-  it.each([
-    [QueryController, 'ask'],
-    [QueryController, 'stream'],
-    [DocumentsController, 'create'],
-    [DocumentsController, 'upload'],
-    [DocumentsController, 'reindexAll'],
-    [DocumentsController, 'update'],
-    [DocumentsController, 'reindex'],
-    [JobsController, 'indexText'],
-    [JobsController, 'upload'],
-    [JobsController, 'reindexAll'],
-  ])('%p.%s calls a model and is marked @Costly()', (controller, handler) => {
-    expect(costly(controller as never, handler)).toBe(true);
+/**
+ * Every route has to be classified here. Adding a route without deciding whether it calls a model (and so
+ * needs @Costly()) fails this test, instead of silently giving it only the general limit.
+ */
+const CLASSIFIED = [
+  { controller: QueryController, costly: ['ask', 'stream'], cheap: [] },
+  { controller: DocumentsController, costly: ['create', 'upload', 'reindexAll', 'update', 'reindex'], cheap: ['list', 'get', 'remove'] },
+  { controller: JobsController, costly: ['indexText', 'upload', 'reindexAll'], cheap: ['list', 'get'] },
+];
+
+describe.each(CLASSIFIED)('$controller.name routes', ({ controller, costly, cheap }) => {
+  it('are all classified as costly or cheap, so a new route cannot be forgotten', () => {
+    expect(routes(controller).sort()).toEqual([...costly, ...cheap].sort());
   });
 
-  it.each([
-    [DocumentsController, 'list'],
-    [DocumentsController, 'get'],
-    [DocumentsController, 'remove'],
-    [JobsController, 'list'],
-    [JobsController, 'get'],
-  ])('%p.%s is a cheap route', (controller, handler) => {
-    expect(costly(controller as never, handler)).toBe(false);
+  it('marks exactly the costly ones with @Costly()', () => {
+    for (const handler of costly) expect([handler, marked(controller, handler)]).toEqual([handler, true]);
+    for (const handler of cheap) expect([handler, marked(controller, handler)]).toEqual([handler, false]);
   });
 });
