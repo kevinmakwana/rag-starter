@@ -5,12 +5,14 @@
 import 'reflect-metadata';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { readdir, readFile } from 'fs/promises';
 import { AddressInfo } from 'net';
 import { join, resolve } from 'path';
 import { Client } from 'pg';
 import { APP_CONFIG, AppConfig } from '../src/config';
-import { evaluate } from '../src/eval/evaluate';
+import { evaluate, evaluateAnswers } from '../src/eval/evaluate';
+import { Judge } from '../src/eval/judge';
 import { JobsService } from '../src/jobs/jobs.service';
 import { EMBEDDING_PROVIDER, EmbeddingProvider } from '../src/providers/types';
 import { QueryService } from '../src/query/query.service';
@@ -56,6 +58,9 @@ describeIfDb('API (e2e)', () => {
       EMBEDDING_PROVIDER: 'mock',
       CHAT_PROVIDER: 'mock',
       EMBEDDING_DIM: '256',
+      // This suite makes hundreds of calls from one address; rate limiting has its own spec.
+      RATE_LIMIT_PER_MIN: '0',
+      RATE_LIMIT_COSTLY_PER_MIN: '0',
     });
     // Tables here are tiny, so Postgres would scan them sequentially and never exercise the HNSW index.
     // Discourage that for the app's connections so index behaviour (e.g. filtered search) is what we test.
@@ -628,6 +633,27 @@ describeIfDb('API (e2e)', () => {
     expect(report.abstainRate).toBeGreaterThanOrEqual(0.3);
   });
 
+  // The mock chat provider echoes the top passage with a [1] citation, so groundedness can't be judged
+  // offline (a stub judge stands in, and real judging is covered by the unit tests and `npm run eval -- --answers`).
+  // This guards the deterministic half: refuse when nothing relevant was retrieved, and cite when answering.
+  // (wrongRefusals and unjudged are not asserted: with the mock and a stub judge they cannot be anything but 0.)
+  it('keeps the deterministic answer metrics above the baseline', async () => {
+    const ids = await indexSamples();
+    const dataset = await loadDataset();
+    const query = app.get(QueryService);
+    const everythingSupported: Judge = {
+      judge: async (_question, answer) => ({ claims: [{ claim: answer, supported: true }] }),
+    };
+
+    const report = await evaluateAnswers((question) => query.askWithPassages(question), everythingSupported, dataset);
+
+    await Promise.all(ids.map((id) => fetch(`${base}/documents/${id}`, { method: 'DELETE' })));
+    if (report.failures.length) console.log('answer failures:', JSON.stringify(report.failures, null, 1));
+    // The mock refuses exactly when retrieval returns nothing, so this tracks the abstain baseline (33%).
+    expect(report.refusalRate).toBeGreaterThanOrEqual(0.3);
+    expect(report.citationRate).toBe(1);
+  });
+
 });
 
 describeIfDb('authentication and per-user isolation (e2e)', () => {
@@ -773,5 +799,65 @@ describeIfDb('authentication and per-user isolation (e2e)', () => {
 
     expect((await readJson(await as(ALICE, 'GET', '/documents'))).map((d: { id: string }) => d.id)).not.toContain(legacy.id);
     expect((await readJson(await as(LEGACY, 'GET', '/documents'))).map((d: { id: string }) => d.id)).toContain(legacy.id);
+  });
+});
+
+/**
+ * The real app and real routes with a tiny costly limit. It lives in this file, not its own, on purpose:
+ * Jest runs spec files in parallel workers, and two apps migrating the same database at once race on
+ * CREATE ... IF NOT EXISTS ("duplicate key value violates unique constraint pg_class_relname_nsp_index").
+ */
+describeIfDb('rate limiting on the real routes (e2e)', () => {
+  let app: INestApplication;
+  let base: string;
+
+  beforeAll(async () => {
+    Object.assign(process.env, {
+      DATABASE_URL: DB,
+      EMBEDDING_PROVIDER: 'mock',
+      CHAT_PROVIDER: 'mock',
+      EMBEDDING_DIM: '256',
+      API_KEYS: '',
+      RATE_LIMIT_PER_MIN: '0',
+      RATE_LIMIT_COSTLY_PER_MIN: '3',
+    });
+    const { AppModule } = await import('../src/app.module');
+    const { configureApp } = await import('../src/app.setup');
+    const { APP_CONFIG } = await import('../src/config');
+    const nest = await NestFactory.create<NestExpressApplication>(AppModule, { logger: false });
+    configureApp(nest, nest.get(APP_CONFIG));
+    await nest.listen(0);
+    app = nest;
+    base = `http://127.0.0.1:${(nest.getHttpServer().address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    await app?.close();
+  });
+
+  const post = (path: string, body: unknown) =>
+    fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+
+  it('shares the costly budget across query, stream, documents and jobs, and answers 429 as JSON before any SSE', async () => {
+    expect((await post('/query', { question: 'anything?' })).status).toBe(200);
+    expect((await post('/query', { question: 'anything?' })).status).toBe(200);
+    expect((await post('/query/stream', { question: 'anything?' })).status).toBe(200);
+
+    const query = await post('/query', { question: 'anything?' });
+    expect(query.status).toBe(429);
+    expect(Number(query.headers.get('retry-after'))).toBeGreaterThanOrEqual(1);
+
+    const stream = await post('/query/stream', { question: 'anything?' });
+    expect(stream.status).toBe(429);
+    expect(stream.headers.get('content-type')).toMatch(/application\/json/);
+    expect(stream.headers.get('content-type')).not.toMatch(/event-stream/);
+
+    expect((await post('/documents', { title: 'T', content: 'Some text to index.' })).status).toBe(429);
+    expect((await post('/jobs/documents', { title: 'T', content: 'Some text to index.' })).status).toBe(429);
+  });
+
+  it('keeps cheap routes and /health open while the costly budget is spent', async () => {
+    expect((await fetch(`${base}/documents`)).status).toBe(200);
+    for (let i = 0; i < 5; i++) expect((await fetch(`${base}/health`)).status).toBe(200);
   });
 });

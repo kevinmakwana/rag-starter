@@ -189,6 +189,17 @@ curl -s localhost:4000/documents -H "Authorization: Bearer <alice's key>"    # o
 - The web app asks for the key on first use and keeps it in this browser's `localStorage`; **Sign out** forgets it. Serve the API over HTTPS in production, since keys travel in a header.
 - This is access control for a shared deployment, not a full account system: there is no sign-up, per-key permissions or admin role. Switching the embedding model is index-wide, so each user must run **Re-index all** for their own documents. On a very large multi-tenant corpus, filtering by owner after an approximate (HNSW) search is slow; partition the table by owner instead.
 
+### Rate limits
+
+Every call to a model costs money, so requests are limited per caller: the user when `API_KEYS` is set, otherwise the client IP. Two limits apply, each over a 60-second window:
+
+- `RATE_LIMIT_PER_MIN` (default 300) counts every request except `/health`.
+- `RATE_LIMIT_COSTLY_PER_MIN` (default 20) also counts the routes that call a model: asking questions (`/query`, `/query/stream`) and everything that embeds (creating, updating, uploading and re-indexing documents, including the `/jobs` versions).
+
+Over the limit, the API answers `429` with a `Retry-After` header (seconds), and the web app says how long to wait. `0` turns a limit off.
+
+Known limits: counters live in the API process's memory, so they reset on restart, and running several API instances multiplies the limit. The window is fixed, so a caller can briefly send up to twice the limit across a window boundary. Wrong API keys are rejected before the limiter and are not counted (keys are at least 16 characters). Behind a reverse proxy set `TRUST_PROXY` to the number of proxies in front of the API, usually `1` (see `.env.example`), or every client shares the proxy's address. Avoid `TRUST_PROXY=true`: most proxies append to a client-supplied `X-Forwarded-For`, so a client could choose its own address and dodge the limits (the API warns at startup). For a public deployment, also set a spend cap at your model provider as a backstop.
+
 ## Background jobs
 
 Slow work (parsing a big PDF, embedding hundreds of chunks, re-indexing everything) can run as a job instead of holding a request open. The queue is a Postgres table worked off inside the API process (`INGEST_CONCURRENCY`, default 2), so it needs no extra service. Queued jobs survive a restart; a job that was *running* when the server stopped is marked failed, not retried, because retrying a file that crashed the parser could loop forever. That recovery assumes a single API process (claiming jobs is safe with several; recovery would fail another instance's live jobs). Uploaded bytes and pasted text are deleted from the job row as soon as it finishes, and finished jobs are purged after 7 days. The web app uses jobs for uploads, pasted text and **Re-index all**.
@@ -203,6 +214,19 @@ Slow work (parsing a big PDF, embedding hundreds of chunks, re-indexing everythi
 ## Measuring retrieval
 
 `eval/dataset.json` holds questions labelled with the section that answers them (and a few the documents can't answer). `npm run eval` reports hit@k, hit@1, MRR and how often unanswerable questions correctly retrieve nothing, against whatever providers `.env` selects. Run it with `SEARCH_MODE=vector` and `SEARCH_MODE=hybrid` to compare, and with a real embedding provider before trusting the numbers: the offline mock is word-based, so it flatters lexical search. The e2e suite fails if mock-mode quality drops below the recorded baseline.
+
+### Measuring answers
+
+`npm run eval -- --answers` also generates an answer for every question and scores it. The chat model acts as the judge: it splits each answer into claims and checks whether the passages that claim cites actually support it. It reports:
+
+- **grounded**: the mean share of supported claims, and **fully grounded**, the share of answers where every claim is supported.
+- **cited**: answers that cite at least one passage.
+- **wrong refusals**: "I don't know" even though retrieval found the right section. (A refusal after retrieval missed is a retrieval failure and shows up in the retrieval numbers instead. Answers retrieve `TOP_K` passages, so the two reports line up only when `--k` equals `TOP_K`.)
+- **refusal**: unanswerable questions that were correctly refused.
+
+Failing answers are listed with the unsupported claims quoted. `--min-grounded=0.9` and `--min-refusal=0.8` set the exit code like `--min-hit` does, and need `--answers`. If the judge errors or returns something unreadable, that answer is reported as *unjudged* and left out of the scores; the `--min-grounded` gate counts unjudged answers as ungrounded, so a judge that fails on most answers fails the gate rather than letting the few that worked pass it. Write the flags as `--min-grounded=0.9`; a bare `--min-grounded` or `--min-grounded 0.9` is an error, not a skipped gate.
+
+Caveats: the judge is the same model that wrote the answers, which tends to be lenient, so treat the score as a regression signal rather than an absolute measure. Judging is not deterministic, so compare runs on the same provider and expect a little variance. It generates an answer for every question and judges each answer that is not a refusal, so a run makes one chat call per question plus one judge call per answered question (more with `RERANKER=llm`, which adds a call per question). With `CHAT_PROVIDER=mock` the groundedness number is meaningless; the e2e suite only guards the deterministic parts (refusals and citations).
 
 ## Testing
 

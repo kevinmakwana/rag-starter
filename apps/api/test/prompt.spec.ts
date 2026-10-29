@@ -60,6 +60,14 @@ describe('isRefusal', () => {
   it('does not flag real answers', () => {
     expect(isRefusal('Backups are kept for 30 days [1].')).toBe(false);
   });
+
+  it('accepts a typographic apostrophe', () => {
+    expect(isRefusal('I don\u2019t know based on the provided documents.')).toBe(true);
+  });
+
+  it('does not flag a partial answer that goes on to cite a passage', () => {
+    expect(isRefusal("I don't know the refund window, but invoices go out monthly [1].")).toBe(false);
+  });
 });
 
 describe('mock providers', () => {

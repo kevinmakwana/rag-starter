@@ -14,7 +14,7 @@
     "eval": "npm run eval -w apps/api --",
     "build": "npm run build -w apps/api && npm run build -w apps/web",
     "typecheck": "npm run typecheck -w apps/api && npm run typecheck -w apps/web",
-    "test": "npm test -w apps/api"
+    "test": "npm test -w apps/api && npm test -w apps/web"
   },
   "engines": {
     "node": ">=20"

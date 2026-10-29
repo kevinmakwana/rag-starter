@@ -42,6 +42,12 @@ export interface QueryResult {
   };
 }
 
+/** A result plus the full passages behind it; `passages[i]` is source `[i + 1]`. */
+export interface AnsweredQuestion {
+  result: QueryResult;
+  passages: RetrievedChunk[];
+}
+
 export type QueryStreamEvent =
   | { type: 'sources'; sources: Source[] }
   | { type: 'token'; text: string }
@@ -243,6 +249,17 @@ export class QueryService {
     history?: HistoryMessage[],
     owner = DEFAULT_OWNER,
   ): Promise<QueryResult> {
+    return (await this.askWithPassages(question, topK, documentIds, history, owner)).result;
+  }
+
+  /** `ask`, also returning the full retrieved passages (sources only carry a 320-character snippet). */
+  async askWithPassages(
+    question: string,
+    topK = this.cfg.topK,
+    documentIds?: string[],
+    history?: HistoryMessage[],
+    owner = DEFAULT_OWNER,
+  ): Promise<AnsweredQuestion> {
     const started = Date.now();
     const searchQuestion = await this.standalone(question, history);
     const chunks = await this.retrieve(searchQuestion, topK, documentIds, owner);
@@ -251,7 +268,10 @@ export class QueryService {
       ? await this.chat.complete(buildMessages(searchQuestion, chunks))
       : NO_CONTEXT_ANSWER;
 
-    return this.toResult(answer, chunks, started, searchQuestion !== question ? searchQuestion : undefined);
+    return {
+      result: this.toResult(answer, chunks, started, searchQuestion !== question ? searchQuestion : undefined),
+      passages: chunks,
+    };
   }
 
   /**
