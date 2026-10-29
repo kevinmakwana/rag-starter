@@ -10,6 +10,7 @@ import { DocumentsService } from './documents/documents.service';
 import { JobsModule } from './jobs/jobs.module';
 import { ProvidersModule } from './providers/providers.module';
 import { QueryModule } from './query/query.module';
+import { RateLimitGuard } from './rate-limit/rate-limit.guard';
 
 @Controller('health')
 class HealthController {
@@ -53,6 +54,10 @@ class HealthController {
     QueryModule,
   ],
   controllers: [HealthController],
-  providers: [{ provide: APP_GUARD, useClass: AuthGuard }],
+  // Order matters: AuthGuard identifies the user first, then the limiter counts that user.
+  providers: [
+    { provide: APP_GUARD, useClass: AuthGuard },
+    { provide: APP_GUARD, useClass: RateLimitGuard },
+  ],
 })
 export class AppModule {}

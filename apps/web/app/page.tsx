@@ -1,7 +1,7 @@
 'use client';
 
 import { FormEvent, Fragment, useCallback, useEffect, useRef, useState } from 'react';
-import { api, apiKey, AuthError, DocumentSummary, Health, HistoryMessage, QueryResult } from '@/lib/api';
+import { api, apiKey, AuthError, DocumentSummary, Health, HistoryMessage, listNames, QueryResult, RateLimitError } from '@/lib/api';
 
 /** How many past question/answer pairs are sent along so follow-ups make sense. */
 const HISTORY_TURNS = 3;
@@ -66,9 +66,12 @@ export default function Home() {
   const [notice, setNotice] = useState<{ kind: 'error' | 'ok'; text: string } | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const bottom = useRef<HTMLDivElement>(null);
+  /** The error behind the last failed request, for callers that need to tell what kind it was. */
+  const lastError = useRef<unknown>(null);
 
   /** A rejected key opens the key prompt; anything else is shown as a notice. */
   const handleError = useCallback((err: unknown) => {
+    lastError.current = err;
     if (err instanceof AuthError) setNeedsKey(true);
     else setNotice({ kind: 'error', text: (err as Error).message });
   }, []);
@@ -99,6 +102,7 @@ export default function Home() {
   const run = async (label: string, fn: () => Promise<DocumentSummary>) => {
     setBusy(true);
     setNotice(null);
+    lastError.current = null;
     try {
       const doc = await fn();
       setNotice({
@@ -157,7 +161,16 @@ export default function Home() {
   };
 
   const onUpload = async (files: FileList | null) => {
-    for (const file of Array.from(files ?? [])) await run('Indexed', () => api.uploadDocument(file));
+    const picked = Array.from(files ?? []);
+    for (const [index, file] of picked.entries()) {
+      const ok = await run('Indexed', () => api.uploadDocument(file));
+      if (!ok && lastError.current instanceof RateLimitError) {
+        // Every later upload would be refused too: stop, and say which files still need indexing.
+        const left = listNames(picked.slice(index).map((f) => f.name));
+        setNotice({ kind: 'error', text: `${lastError.current.message} Not indexed yet: ${left}.` });
+        break;
+      }
+    }
     if (fileInput.current) fileInput.current.value = '';
   };
 

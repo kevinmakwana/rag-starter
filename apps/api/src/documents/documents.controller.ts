@@ -17,6 +17,7 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Response } from 'express';
 import { CurrentUser } from '../auth/current-user.decorator';
+import { Costly } from '../rate-limit/costly.decorator';
 import { ExtractionError } from '../ingestion/extractors';
 import {
   CreateDocumentDto,
@@ -43,6 +44,7 @@ export class DocumentsController {
   }
 
   /** Index pasted text. Responds 200 instead of 201 when the content was already indexed. */
+  @Costly()
   @Post()
   async create(
     @Body() dto: CreateDocumentDto,
@@ -53,6 +55,7 @@ export class DocumentsController {
   }
 
   /** Index an uploaded .md, .txt, .pdf or .docx file (multipart field name: "file"). */
+  @Costly()
   @Post('upload')
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES } }))
   async upload(
@@ -70,6 +73,7 @@ export class DocumentsController {
   }
 
   /** Re-index every document with the current chunking settings and embedding model. */
+  @Costly()
   @Post('reindex')
   @HttpCode(200)
   reindexAll(@CurrentUser() owner: string): Promise<ReindexReport> {
@@ -82,6 +86,7 @@ export class DocumentsController {
   }
 
   /** Change the title and/or text of a document; it is re-embedded. */
+  @Costly()
   @Put(':id')
   update(
     @Param('id', new ParseUUIDPipe()) id: string,
@@ -92,6 +97,7 @@ export class DocumentsController {
   }
 
   /** Re-index one document from its stored text. */
+  @Costly()
   @Post(':id/reindex')
   @HttpCode(200)
   reindex(@Param('id', new ParseUUIDPipe()) id: string, @CurrentUser() owner: string): Promise<DocumentSummary> {
