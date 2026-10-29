@@ -34,6 +34,13 @@ export interface AppConfig {
   reranker: RerankerName;
   /** How many previous chat messages are used to resolve follow-up questions (0 disables memory). */
   historyMessages: number;
+  /** Requests per minute per caller. `costlyPerMinute` also applies to routes that call a model. 0 = no limit. */
+  rateLimit: { perMinute: number; costlyPerMinute: number };
+  /**
+   * Express `trust proxy`: how many proxy hops to trust so the client IP is the real one. Prefer a number:
+   * `true` believes the left-most X-Forwarded-For entry, which a client can choose when the proxy appends to it.
+   */
+  trustProxy: boolean | number;
   /** `baseUrl` points the OpenAI client at any OpenAI-compatible server (Ollama, vLLM, LM Studio, ...). */
   openai: { apiKey?: string; baseUrl?: string; embeddingModel: string; chatModel: string };
   anthropic: { apiKey?: string; chatModel: string; maxTokens: number };
@@ -55,6 +62,20 @@ function oneOf<T extends string>(name: string, allowed: readonly T[], fallback: 
   return raw;
 }
 
+function wholeNumber(name: string, fallback: number): number {
+  const value = int(name, fallback);
+  if (!Number.isInteger(value) || value < 0) throw new Error(`${name} must be a whole number, 0 or more`);
+  return value;
+}
+
+function trustProxy(name: string): boolean | number {
+  const raw = (process.env[name] ?? '').trim().toLowerCase();
+  if (raw === '' || raw === 'false') return false;
+  if (raw === 'true') return true;
+  if (/^\d+$/.test(raw)) return Number(raw);
+  throw new Error(`${name} must be true, false or a whole number of proxy hops, got "${process.env[name]}"`);
+}
+
 export function loadConfig(): AppConfig {
   const cfg: AppConfig = {
     databaseUrl: process.env.DATABASE_URL ?? 'postgres://rag:rag@localhost:5432/rag',
@@ -73,6 +94,8 @@ export function loadConfig(): AppConfig {
     ingestConcurrency: int('INGEST_CONCURRENCY', 2),
     reranker: oneOf('RERANKER', ['none', 'llm'] as const, 'none'),
     historyMessages: int('HISTORY_MESSAGES', 6),
+    rateLimit: { perMinute: wholeNumber('RATE_LIMIT_PER_MIN', 300), costlyPerMinute: wholeNumber('RATE_LIMIT_COSTLY_PER_MIN', 20) },
+    trustProxy: trustProxy('TRUST_PROXY'),
     openai: {
       apiKey: process.env.OPENAI_API_KEY || undefined,
       baseUrl: process.env.OPENAI_BASE_URL || undefined,

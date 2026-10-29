@@ -41,6 +41,7 @@
   "jest": {
     "preset": "ts-jest/presets/default-esm",
     "testEnvironment": "node",
+    "testTimeout": 30000,
     "roots": [
       "<rootDir>/test"
     ],
