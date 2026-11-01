@@ -56,6 +56,8 @@ export interface QueryResult {
 export interface Health {
   status: string;
   authRequired: boolean;
+  /** True when the API runs as a read-only public demo. Absent on an API that predates demo mode. */
+  demo?: boolean;
   embeddingModel: string;
   mismatchedDocuments: number;
   embeddingProvider: string;
@@ -97,10 +99,17 @@ export class RateLimitError extends Error {
   }
 }
 
+/** "1 second", "75 seconds", "5 minutes", "about 13 hours": how long a visitor is asked to wait, in words. */
+function describeWait(seconds: number): string {
+  if (seconds < 120) return `${seconds} ${seconds === 1 ? 'second' : 'seconds'}`;
+  if (seconds < 7200) return `${Math.ceil(seconds / 60)} minutes`;
+  return `about ${Math.round(seconds / 3600)} hours`;
+}
+
 function rateLimited(res: Response): RateLimitError {
   const seconds = Number(res.headers.get('retry-after'));
   const known = Number.isFinite(seconds) && seconds > 0;
-  const wait = known ? `Try again in ${Math.ceil(seconds)} ${Math.ceil(seconds) === 1 ? 'second' : 'seconds'}.` : 'Try again shortly.';
+  const wait = known ? `Try again in ${describeWait(Math.ceil(seconds))}.` : 'Try again shortly.';
   return new RateLimitError(`Too many requests. ${wait}`, known ? Math.ceil(seconds) : undefined);
 }
 
