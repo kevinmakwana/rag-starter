@@ -30,6 +30,14 @@ describe('DemoSeeder', () => {
     expect(documents.created.length).toBeGreaterThanOrEqual(2);
   });
 
+  it('stops waiting for a seeding that hangs, so the API still opens its port', async () => {
+    const hanging = { list: () => new Promise(() => undefined), create: async () => undefined as never };
+    const seeder = new DemoSeeder(config(true), hanging as never);
+    seeder.waitMs = 20;
+
+    await expect(seeder.onApplicationBootstrap()).resolves.toBeUndefined();
+  }, 2000);
+
   it('logs and carries on when seeding fails, so the API still starts', async () => {
     const failing = {
       list: async () => {

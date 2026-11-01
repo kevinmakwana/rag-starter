@@ -50,6 +50,16 @@ class Probe {
   }
 }
 
+/** @DemoSafe() on a whole class is a mistake that must not open its write routes: only a handler can be safe. */
+@DemoSafe()
+@Controller('classlevel')
+class ClassLevelProbe {
+  @Post('write')
+  create() {
+    return { ok: true };
+  }
+}
+
 const ALICE = 'alice-key-0123456789';
 const BOB = 'bobs-key-abcdefghijk';
 const CAROL = 'carol-key-zyxwvutsrq';
@@ -82,7 +92,7 @@ describe('demo mode guards', () => {
       imports: [
         { module: class ConfigModule {}, global: true, providers: [{ provide: APP_CONFIG, useValue: cfg }], exports: [APP_CONFIG] },
       ],
-      controllers: [Probe],
+      controllers: [Probe, ClassLevelProbe],
       providers: [
         { provide: APP_GUARD, useClass: AuthGuard },
         { provide: APP_GUARD, useClass: DemoModeGuard },
@@ -122,6 +132,13 @@ describe('demo mode guards', () => {
         message: 'This is a read-only demo: uploading, editing and deleting are turned off.',
       });
     }
+  });
+
+  it('does not let @DemoSafe() on a whole class open its other routes: only a handler can be marked', async () => {
+    const call = await start({ cap: 1 });
+
+    expect((await call('POST', '/classlevel/write')).status).toBe(403);
+    expect((await call('POST', '/ask')).status).toBe(201); // and a marked handler is still the way in
   });
 
   it('changes nothing when demo mode is off', async () => {

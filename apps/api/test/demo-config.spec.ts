@@ -1,7 +1,7 @@
 import { loadConfig } from '../src/config';
 
 describe('loadConfig for demo mode', () => {
-  const KEYS = ['DEMO_MODE', 'DEMO_MAX_QUERIES_PER_DAY'];
+  const KEYS = ['DEMO_MODE', 'DEMO_MAX_QUERIES_PER_DAY', 'API_KEYS'];
   const saved: Record<string, string | undefined> = {};
   beforeEach(() => {
     KEYS.forEach((k) => {
@@ -30,6 +30,18 @@ describe('loadConfig for demo mode', () => {
   it.each(['yes', '1', 'on'])('rejects DEMO_MODE=%s, naming the variable', (value) => {
     process.env.DEMO_MODE = value;
     expect(() => loadConfig()).toThrow(/DEMO_MODE/);
+  });
+
+  it('refuses demo mode together with API_KEYS: the demo is open to everyone and its samples belong to the default user', () => {
+    Object.assign(process.env, { DEMO_MODE: 'true', API_KEYS: 'alice-key-0123456789:alice' });
+
+    expect(() => loadConfig()).toThrow(/DEMO_MODE.*API_KEYS/);
+  });
+
+  it('allows API_KEYS when demo mode is off', () => {
+    process.env.API_KEYS = 'alice-key-0123456789:alice';
+
+    expect(loadConfig().auth.keys.size).toBe(1);
   });
 
   it('reads DEMO_MAX_QUERIES_PER_DAY, where 0 means no cap', () => {

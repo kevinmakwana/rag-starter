@@ -35,8 +35,10 @@ remembered to mark it, the wrong failure mode on a public server) and a separate
 In demo mode a global `DemoModeGuard` allows:
 
 - any `GET`, `HEAD` or `OPTIONS` request;
-- any route marked `@DemoSafe()` (metadata, same style as `@Public()` and `@Costly()`). Today that is
-  exactly `POST /query` and `POST /query/stream`, which read but use `POST` because they carry a body.
+- any handler marked `@DemoSafe()` (metadata, same style as `@Public()` and `@Costly()`). Today that is
+  exactly `POST /query` and `POST /query/stream`, which read but use `POST` because they carry a body. Only a
+  handler can be marked: the marker is read from the handler alone, so `@DemoSafe()` on a whole controller
+  opens nothing.
 
 Everything else answers `403` with the standard JSON error and the message
 "This is a read-only demo: uploading, editing and deleting are turned off." That covers `POST /documents`,
@@ -47,12 +49,15 @@ routes (`/health`) pass. A route added later is blocked until someone marks it `
 Guard order is `AuthGuard`, `DemoModeGuard`, `RateLimitGuard`, `DemoBudgetGuard`. A blocked write is refused
 cheaply and never spends a visitor's rate-limit budget, and the daily cap (below) only counts requests the
 rate limiter admitted, so one address that floods the API cannot burn the shared budget with refused
-requests. If `API_KEYS` is also set, authentication still applies first.
+requests. `AuthGuard` still comes first, but demo mode and `API_KEYS` are not meant to be combined (see Config).
 
 ### Config
 
 - `DEMO_MODE`: `true` or `false` (default `false`); anything else is a startup error naming the variable.
 - `DEMO_MAX_QUERIES_PER_DAY`: whole number, default `500`, `0` = no daily cap. Only used in demo mode.
+- `DEMO_MODE=true` together with `API_KEYS` is a startup error. A demo is open to everyone and its sample
+  documents belong to the `default` user, so key holders (who are other users) would see no documents, and the
+  web app offers no key prompt in demo mode.
 - `/health` reports `demo: boolean`. The API logs one line at startup saying it is in demo mode and what the
   daily cap is.
 
@@ -63,6 +68,8 @@ logic behind `npm run seed` moves into one shared function (`seedSamples`), used
 idempotent: titles and content hashes that already exist are skipped, so restarts re-embed nothing.
 Documents belong to the `default` user, which is who every visitor is when auth is off.
 
+Startup waits at most 30 seconds for seeding, so a provider that hangs cannot keep the API from opening its
+port; it then logs that it is still indexing and starts, and seeding finishes in the background.
 If seeding fails at startup (for example the embedding provider is unreachable) the API logs the error
 and keeps starting: an empty demo that says so is better than one that does not start. The web app shows
 a notice when demo mode is on and no documents are listed.
@@ -142,8 +149,8 @@ path); the controls being hidden means a visitor normally never sees one.
 
 - The daily counter and the rate limits live in the API process memory: they reset on restart, and several
   API instances multiply them.
-- Everyone shares the `default` user's documents, which is the point of the demo. A demo with `API_KEYS`
-  also set would only let key holders in.
+- Everyone shares the `default` user's documents, which is the point of the demo. Combining demo mode with
+  `API_KEYS` is refused at startup.
 - The demo is only as safe as the host in front of it: HTTPS, `TRUST_PROXY`, the database not exposed and a
   provider spend cap are the deployment guide's job (separate TODO item).
 - The daily cap can be used up by one determined address (see the trade-off above); that is a loss of

@@ -131,6 +131,12 @@ export function loadConfig(): AppConfig {
   if (cfg.chunkOverlap >= cfg.chunkSize) {
     throw new Error('CHUNK_OVERLAP must be smaller than CHUNK_SIZE');
   }
+  if (cfg.demo.enabled && cfg.auth.keys.size > 0) {
+    throw new Error(
+      'DEMO_MODE=true needs API_KEYS to be empty: a demo is open to everyone and its sample documents belong to the ' +
+        'default user, so key holders would see none of them.',
+    );
+  }
   const needsOpenAI = cfg.embeddingProvider === 'openai' || cfg.chatProvider === 'openai';
   // A self-hosted OpenAI-compatible server usually needs no key.
   if (needsOpenAI && !cfg.openai.apiKey && !cfg.openai.baseUrl) {

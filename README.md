@@ -205,7 +205,8 @@ Known limits: counters live in the API process's memory, so they reset on restar
 Set `DEMO_MODE=true` and anyone who can reach the API can ask questions over the sample documents, and nothing else:
 
 - Only reads and the two question routes (`/query`, `/query/stream`) work. Every other route (uploading, editing, deleting, re-indexing, background jobs) answers `403`, including any route added later until it is marked `@DemoSafe()`.
-- The files in `samples/` are indexed when the API starts (nothing is re-embedded on a restart), so there is no `npm run seed` step. If that fails, the API logs it and starts anyway; the web app then says the documents are not indexed yet.
+- The files in `samples/` are indexed when the API starts (nothing is re-embedded on a restart), so there is no `npm run seed` step. Startup waits at most 30 seconds for that; if it fails or takes longer, the API logs it and starts anyway, and the web app says the documents are not indexed yet.
+- `DEMO_MODE=true` together with `API_KEYS` is refused at startup: a demo is open to everyone, and its sample documents belong to the default user, so key holders would see none.
 - At most `DEMO_MAX_QUERIES_PER_DAY` questions (default 500, `0` = no cap) are answered per UTC day across all visitors; after that the API answers `429` until midnight UTC.
 - The web app shows a read-only banner and clickable starter questions, and hides the upload, paste, delete and re-index controls. That is a courtesy: the API is what enforces the rules.
 
