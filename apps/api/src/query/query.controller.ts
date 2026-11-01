@@ -16,6 +16,7 @@ import {
 } from 'class-validator';
 import { Response } from 'express';
 import { CurrentUser } from '../auth/current-user.decorator';
+import { DemoSafe } from '../demo/demo-safe.decorator';
 import { Costly } from '../rate-limit/costly.decorator';
 import { QueryResult, QueryService } from './query.service';
 import { formatSseEvent } from './sse';
@@ -61,6 +62,7 @@ export class QueryDto {
 export class QueryController {
   constructor(@Inject(QueryService) private readonly query: QueryService) {}
 
+  @DemoSafe()
   @Costly()
   @Post()
   @HttpCode(200)
@@ -72,6 +74,7 @@ export class QueryController {
    * Same as POST /query, streamed as Server-Sent Events: `sources`, then `token`s,
    * then `done` (the full result). POST rather than GET because it carries a body.
    */
+  @DemoSafe()
   @Costly()
   @Post('stream')
   @HttpCode(200)
