@@ -1,6 +1,6 @@
 # Demo mode: design
 
-Status: design approved in conversation 2026-10-29; this written spec awaits review.
+Status: implemented; see the plan for the rulings made on the way.
 
 ## Why
 

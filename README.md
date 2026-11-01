@@ -200,6 +200,19 @@ Over the limit, the API answers `429` with a `Retry-After` header (seconds), and
 
 Known limits: counters live in the API process's memory, so they reset on restart, and running several API instances multiplies the limit. The window is fixed, so a caller can briefly send up to twice the limit across a window boundary. Wrong API keys are rejected before the limiter and are not counted (keys are at least 16 characters). Behind a reverse proxy set `TRUST_PROXY` to the number of proxies in front of the API, usually `1` (see `.env.example`), or every client shares the proxy's address. Avoid `TRUST_PROXY=true`: most proxies append to a client-supplied `X-Forwarded-For`, so a client could choose its own address and dodge the limits (the API warns at startup). For a public deployment, also set a spend cap at your model provider as a backstop.
 
+### Running a public demo
+
+Set `DEMO_MODE=true` and anyone who can reach the API can ask questions over the sample documents, and nothing else:
+
+- Only reads and the two question routes (`/query`, `/query/stream`) work. Every other route (uploading, editing, deleting, re-indexing, background jobs) answers `403`, including any route added later until it is marked `@DemoSafe()`.
+- The files in `samples/` are indexed when the API starts (nothing is re-embedded on a restart), so there is no `npm run seed` step. If that fails, the API logs it and starts anyway; the web app then says the documents are not indexed yet.
+- At most `DEMO_MAX_QUERIES_PER_DAY` questions (default 500, `0` = no cap) are answered per UTC day across all visitors; after that the API answers `429` until midnight UTC.
+- The web app shows a read-only banner and clickable starter questions, and hides the upload, paste, delete and re-index controls. That is a courtesy: the API is what enforces the rules.
+
+Recommended settings for a demo on a real model: leave `API_KEYS` empty, `RATE_LIMIT_COSTLY_PER_MIN=5`, `TRUST_PROXY=1` behind one reverse proxy, HTTPS, the database not exposed to the internet, and a spend cap at your model provider.
+
+Limits worth knowing: the daily cap protects your bill, not availability. One address can use it all up (at 5 questions a minute that takes about 100 minutes), after which everyone sees "try again tomorrow". The cap and the rate limits live in the API process's memory, so they reset on a restart and several API instances multiply them. Demo mode does not filter what visitors ask.
+
 ## Background jobs
 
 Slow work (parsing a big PDF, embedding hundreds of chunks, re-indexing everything) can run as a job instead of holding a request open. The queue is a Postgres table worked off inside the API process (`INGEST_CONCURRENCY`, default 2), so it needs no extra service. Queued jobs survive a restart; a job that was *running* when the server stopped is marked failed, not retried, because retrying a file that crashed the parser could loop forever. That recovery assumes a single API process (claiming jobs is safe with several; recovery would fail another instance's live jobs). Uploaded bytes and pasted text are deleted from the job row as soon as it finishes, and finished jobs are purged after 7 days. The web app uses jobs for uploads, pasted text and **Re-index all**.
