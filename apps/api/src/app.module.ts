@@ -6,6 +6,7 @@ import { APP_CONFIG, AppConfig, loadConfig } from './config';
 import { DatabaseModule } from './database/database.module';
 import { DatabaseService } from './database/database.service';
 import { DemoBudgetGuard, DemoModeGuard } from './demo/demo-mode.guard';
+import { DemoSeeder } from './demo/demo-seeder';
 import { DocumentsModule } from './documents/documents.module';
 import { DocumentsService } from './documents/documents.service';
 import { JobsModule } from './jobs/jobs.module';
@@ -63,6 +64,7 @@ class HealthController {
     { provide: APP_GUARD, useClass: DemoModeGuard },
     { provide: APP_GUARD, useClass: RateLimitGuard },
     { provide: APP_GUARD, useClass: DemoBudgetGuard },
+    DemoSeeder,
   ],
 })
 export class AppModule {}
