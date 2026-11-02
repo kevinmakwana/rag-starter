@@ -21,7 +21,14 @@ async function bootstrap() {
     );
   }
 
-  if (cfg.auth.keys.size === 0) {
+  if (cfg.demo.enabled) {
+    Logger.log(
+      `DEMO MODE: read-only; ${cfg.demo.maxQueriesPerDay ? `at most ${cfg.demo.maxQueriesPerDay} questions per UTC day` : 'no daily question cap'}.`,
+      'Bootstrap',
+    );
+  }
+
+  if (cfg.auth.keys.size === 0 && !cfg.demo.enabled) {
     Logger.warn(
       'Authentication is OFF: anyone who can reach this API can read, change and delete every document. ' +
         'Set API_KEYS to require a key (see README).',

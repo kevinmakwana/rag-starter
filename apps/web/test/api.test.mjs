@@ -41,6 +41,24 @@ describe('rate-limited responses', () => {
     assert.equal(err.message, 'Too many requests. Try again in 1 second.');
   });
 
+  it('express a long wait in minutes or hours, as when the demo has used up its daily questions', async () => {
+    const cases = [
+      ['75', 'Too many requests. Try again in 75 seconds.'],
+      ['300', 'Too many requests. Try again in 5 minutes.'],
+      ['3599', 'Too many requests. Try again in 60 minutes.'],
+      ['7200', 'Too many requests. Try again in about 2 hours.'],
+      ['47848', 'Too many requests. Try again in about 13 hours.'],
+    ];
+    for (const [seconds, message] of cases) {
+      fakeApi(() => json(429, { statusCode: 429 }, { 'retry-after': seconds }));
+
+      const err = await api.listDocuments().catch((e) => e);
+
+      assert.equal(err.message, message);
+      assert.equal(err.retryAfterSeconds, Number(seconds));
+    }
+  });
+
   it('fall back to a generic wait when the header is missing or unusable', async () => {
     for (const headers of [{}, { 'retry-after': 'soon' }, { 'retry-after': '0' }]) {
       fakeApi(() => json(429, { statusCode: 429 }, headers));

@@ -41,6 +41,8 @@ export interface AppConfig {
    * `true` believes the left-most X-Forwarded-For entry, which a client can choose when the proxy appends to it.
    */
   trustProxy: boolean | number;
+  /** Demo mode: read-only visitors. `maxQueriesPerDay` caps questions per UTC day across all of them (0 = no cap). */
+  demo: { enabled: boolean; maxQueriesPerDay: number };
   /** `baseUrl` points the OpenAI client at any OpenAI-compatible server (Ollama, vLLM, LM Studio, ...). */
   openai: { apiKey?: string; baseUrl?: string; embeddingModel: string; chatModel: string };
   anthropic: { apiKey?: string; chatModel: string; maxTokens: number };
@@ -66,6 +68,13 @@ function wholeNumber(name: string, fallback: number): number {
   const value = int(name, fallback);
   if (!Number.isInteger(value) || value < 0) throw new Error(`${name} must be a whole number, 0 or more`);
   return value;
+}
+
+function flag(name: string): boolean {
+  const raw = (process.env[name] ?? '').trim().toLowerCase();
+  if (raw === '' || raw === 'false') return false;
+  if (raw === 'true') return true;
+  throw new Error(`${name} must be true or false, got "${process.env[name]}"`);
 }
 
 function trustProxy(name: string): boolean | number {
@@ -96,6 +105,7 @@ export function loadConfig(): AppConfig {
     historyMessages: int('HISTORY_MESSAGES', 6),
     rateLimit: { perMinute: wholeNumber('RATE_LIMIT_PER_MIN', 300), costlyPerMinute: wholeNumber('RATE_LIMIT_COSTLY_PER_MIN', 20) },
     trustProxy: trustProxy('TRUST_PROXY'),
+    demo: { enabled: flag('DEMO_MODE'), maxQueriesPerDay: wholeNumber('DEMO_MAX_QUERIES_PER_DAY', 500) },
     openai: {
       apiKey: process.env.OPENAI_API_KEY || undefined,
       baseUrl: process.env.OPENAI_BASE_URL || undefined,
@@ -120,6 +130,12 @@ export function loadConfig(): AppConfig {
   if (cfg.historyMessages < 0) throw new Error('HISTORY_MESSAGES must be 0 or more');
   if (cfg.chunkOverlap >= cfg.chunkSize) {
     throw new Error('CHUNK_OVERLAP must be smaller than CHUNK_SIZE');
+  }
+  if (cfg.demo.enabled && cfg.auth.keys.size > 0) {
+    throw new Error(
+      'DEMO_MODE=true needs API_KEYS to be empty: a demo is open to everyone and its sample documents belong to the ' +
+        'default user, so key holders would see none of them.',
+    );
   }
   const needsOpenAI = cfg.embeddingProvider === 'openai' || cfg.chatProvider === 'openai';
   // A self-hosted OpenAI-compatible server usually needs no key.

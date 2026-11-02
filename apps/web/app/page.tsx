@@ -2,6 +2,7 @@
 
 import { FormEvent, Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { api, apiKey, AuthError, DocumentSummary, Health, HistoryMessage, listNames, QueryResult, RateLimitError } from '@/lib/api';
+import { DEMO_QUESTIONS } from '@/lib/demo';
 
 /** How many past question/answer pairs are sent along so follow-ups make sense. */
 const HISTORY_TURNS = 3;
@@ -64,6 +65,8 @@ export default function Home() {
   const [needsKey, setNeedsKey] = useState(false);
   const [keyInput, setKeyInput] = useState('');
   const [notice, setNotice] = useState<{ kind: 'error' | 'ok'; text: string } | null>(null);
+  /** The API runs as a read-only public demo: no way to add, change or delete documents. */
+  const demo = health?.demo === true;
   const fileInput = useRef<HTMLInputElement>(null);
   const bottom = useRef<HTMLDivElement>(null);
   /** The error behind the last failed request, for callers that need to tell what kind it was. */
@@ -207,9 +210,13 @@ export default function Home() {
       return next;
     });
 
-  const onAsk = async (e: FormEvent) => {
+  const onAsk = (e: FormEvent) => {
     e.preventDefault();
-    const q = question.trim();
+    void ask(question);
+  };
+
+  const ask = async (raw: string) => {
+    const q = raw.trim();
     if (!q || asking) return;
     const id = Date.now();
     // Earlier answered turns, oldest first. Failed or unanswered turns carry no context.
@@ -250,7 +257,9 @@ export default function Home() {
           </p>
         </header>
 
-        {needsKey && (
+        {demo && <p className="notice ok">Read-only demo: ask about the Acme sample documents.</p>}
+
+        {needsKey && !demo && (
           <form className="paste" onSubmit={onSaveKey}>
             <p className="notice error">This API needs an API key.</p>
             <input
@@ -265,24 +274,26 @@ export default function Home() {
           </form>
         )}
 
-        <div className="actions">
-          <button className="btn" disabled={busy} onClick={() => fileInput.current?.click()}>
-            Upload file
-          </button>
-          <button className="btn ghost" disabled={busy} onClick={() => setPasteOpen((o) => !o)}>
-            {pasteOpen ? 'Cancel' : 'Paste text'}
-          </button>
-          <input
-            ref={fileInput}
-            type="file"
-            accept=".md,.markdown,.txt,.pdf,.docx"
-            multiple
-            hidden
-            onChange={(e) => onUpload(e.target.files)}
-          />
-        </div>
+        {!demo && (
+          <div className="actions">
+            <button className="btn" disabled={busy} onClick={() => fileInput.current?.click()}>
+              Upload file
+            </button>
+            <button className="btn ghost" disabled={busy} onClick={() => setPasteOpen((o) => !o)}>
+              {pasteOpen ? 'Cancel' : 'Paste text'}
+            </button>
+            <input
+              ref={fileInput}
+              type="file"
+              accept=".md,.markdown,.txt,.pdf,.docx"
+              multiple
+              hidden
+              onChange={(e) => onUpload(e.target.files)}
+            />
+          </div>
+        )}
 
-        {pasteOpen && (
+        {pasteOpen && !demo && (
           <form className="paste" onSubmit={onPaste}>
             <input
               placeholder="Title"
@@ -308,14 +319,16 @@ export default function Home() {
           <p className="notice error">
             {health.mismatchedDocuments} document(s) were indexed with a different embedding model than the active one
             ({health.embeddingModel}). Search results will be unreliable until you re-index.{' '}
-            <button className="link" disabled={busy} onClick={onReindexAll}>
-              Re-index all
-            </button>
+            {!demo && (
+              <button className="link" disabled={busy} onClick={onReindexAll}>
+                Re-index all
+              </button>
+            )}
           </p>
         )}
 
         {notice && <p className={`notice ${notice.kind}`}>{notice.text}</p>}
-        {health?.authRequired && !needsKey && (
+        {health?.authRequired && !needsKey && !demo && (
           <p className="muted small">
             <button className="link" onClick={onSignOut}>
               Sign out
@@ -335,7 +348,13 @@ export default function Home() {
           </p>
         )}
         <ul className="docs">
-          {docs.length === 0 && <li className="muted small">No documents yet. Upload one or run npm run seed.</li>}
+          {docs.length === 0 && (
+            <li className="muted small">
+              {demo
+                ? 'The sample documents are not indexed yet. Please check back shortly.'
+                : 'No documents yet. Upload one or run npm run seed.'}
+            </li>
+          )}
           {docs.map((doc) => (
             <li key={doc.id} className={selected.has(doc.id) ? 'selected' : ''}>
               <label>
@@ -347,9 +366,11 @@ export default function Home() {
                   </span>
                 </span>
               </label>
-              <button className="icon" title="Delete" aria-label={`Delete ${doc.title}`} onClick={() => onDelete(doc)}>
-                ×
-              </button>
+              {!demo && (
+                <button className="icon" title="Delete" aria-label={`Delete ${doc.title}`} onClick={() => onDelete(doc)}>
+                  ×
+                </button>
+              )}
             </li>
           ))}
         </ul>
@@ -364,6 +385,15 @@ export default function Home() {
                 Answers are grounded in the retrieved passages and cite their sources. Try “Can I deploy on
                 Fridays?” or “What does the Team plan cost?” with the sample docs.
               </p>
+              {demo && (
+                <div className="starters">
+                  {DEMO_QUESTIONS.map((q) => (
+                    <button key={q} className="btn ghost" disabled={asking} onClick={() => void ask(q)}>
+                      {q}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
           {turns.map((turn) => (
@@ -411,7 +441,7 @@ export default function Home() {
           <input
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
-            placeholder={docs.length ? 'Ask a question…' : 'Add a document first…'}
+            placeholder={docs.length || demo ? 'Ask a question…' : 'Add a document first…'}
             maxLength={2000}
             disabled={asking}
           />
