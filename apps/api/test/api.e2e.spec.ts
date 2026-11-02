@@ -11,6 +11,8 @@ import { AddressInfo } from 'net';
 import { join, resolve } from 'path';
 import { Client } from 'pg';
 import { APP_CONFIG, AppConfig } from '../src/config';
+import { titleFrom } from '../src/documents/documents.dto';
+import { DocumentsService } from '../src/documents/documents.service';
 import { evaluate, evaluateAnswers } from '../src/eval/evaluate';
 import { Judge } from '../src/eval/judge';
 import { JobsService } from '../src/jobs/jobs.service';
@@ -859,5 +861,107 @@ describeIfDb('rate limiting on the real routes (e2e)', () => {
   it('keeps cheap routes and /health open while the costly budget is spent', async () => {
     expect((await fetch(`${base}/documents`)).status).toBe(200);
     for (let i = 0; i < 5; i++) expect((await fetch(`${base}/health`)).status).toBe(200);
+  });
+});
+
+/**
+ * Demo mode on the real app: the samples seed themselves, questions work, every write is refused, and the
+ * daily cap holds. In this file for the same reason as the rate-limit block: one worker per database.
+ */
+describeIfDb('demo mode on the real routes (e2e)', () => {
+  let app: INestApplication;
+  let base: string;
+
+  beforeAll(async () => {
+    Object.assign(process.env, {
+      DATABASE_URL: DB,
+      EMBEDDING_PROVIDER: 'mock',
+      CHAT_PROVIDER: 'mock',
+      EMBEDDING_DIM: '256',
+      API_KEYS: '',
+      RATE_LIMIT_PER_MIN: '0',
+      RATE_LIMIT_COSTLY_PER_MIN: '0',
+      DEMO_MODE: 'true',
+      DEMO_MAX_QUERIES_PER_DAY: '4',
+    });
+    const { AppModule } = await import('../src/app.module');
+    const { configureApp } = await import('../src/app.setup');
+    const nest = await NestFactory.create<NestExpressApplication>(AppModule, { logger: false });
+    configureApp(nest, nest.get(APP_CONFIG));
+    await nest.listen(0);
+    app = nest;
+    base = `http://127.0.0.1:${(nest.getHttpServer().address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    // Writes are refused over HTTP in demo mode, so clean up through the service.
+    const documents = app.get(DocumentsService);
+    for (const doc of await documents.list()) await documents.remove(doc.id, 'default');
+    await app?.close();
+    delete process.env.DEMO_MODE;
+    delete process.env.DEMO_MAX_QUERIES_PER_DAY;
+  });
+
+  const send = (method: string, path: string, body?: unknown) =>
+    fetch(`${base}${path}`, {
+      method,
+      headers: body === undefined ? {} : { 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+
+  it('has indexed the sample documents by the time it answers, with no seed step', async () => {
+    const samples = resolve(process.cwd(), '../../samples');
+    const expected: string[] = [];
+    for (const file of (await readdir(samples)).filter((f) => f.endsWith('.md'))) {
+      expected.push(titleFrom(await readFile(join(samples, file), 'utf8'), file.slice(0, -3)));
+    }
+
+    const titles = ((await readJson(await send('GET', '/documents'))) as { title: string }[]).map((d) => d.title);
+
+    expect(expected.length).toBeGreaterThanOrEqual(2);
+    for (const title of expected) expect(titles).toContain(title);
+  });
+
+  it('reports demo mode in /health', async () => {
+    expect(await readJson(await send('GET', '/health'))).toMatchObject({ demo: true });
+  });
+
+  it('answers a question from the samples, with a citation', async () => {
+    const res = await send('POST', '/query', { question: 'Can I deploy on Fridays?' });
+
+    expect(res.status).toBe(200);
+    const result = await readJson(res);
+    expect(result.sources.length).toBeGreaterThan(0);
+  });
+
+  it('refuses every write with 403 and leaves the documents as they were', async () => {
+    const before = ((await readJson(await send('GET', '/documents'))) as { id: string }[]).map((d) => d.id).sort();
+    const id = before[0];
+
+    const attempts = [
+      send('POST', '/documents', { title: 'Mine', content: 'Visitor text.' }),
+      send('PUT', `/documents/${id}`, { title: 'Hijacked' }),
+      send('DELETE', `/documents/${id}`),
+      send('POST', '/documents/reindex'),
+      send('POST', `/documents/${id}/reindex`),
+      send('POST', '/jobs/documents', { title: 'Mine', content: 'Visitor text.' }),
+      send('POST', '/jobs/reindex'),
+    ];
+    for (const res of await Promise.all(attempts)) expect(res.status).toBe(403);
+
+    const after = ((await readJson(await send('GET', '/documents'))) as { id: string }[]).map((d) => d.id).sort();
+    expect(after).toEqual(before);
+  });
+
+  it('stops answering once the daily cap is used up, and says so', async () => {
+    // One question was spent above; the cap is 4.
+    for (let i = 0; i < 3; i++) expect((await send('POST', '/query', { question: 'What does the Team plan cost?' })).status).toBe(200);
+
+    const res = await send('POST', '/query', { question: 'What does the Team plan cost?' });
+
+    expect(res.status).toBe(429);
+    expect(Number(res.headers.get('retry-after'))).toBeGreaterThanOrEqual(1);
+    expect((await send('POST', '/query/stream', { question: 'x' })).status).toBe(429);
+    expect((await send('GET', '/documents')).status).toBe(200); // reads are not questions
   });
 });
