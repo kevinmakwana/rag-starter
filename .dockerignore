@@ -1,0 +1,16 @@
+.git
+.github
+.superpowers
+docs
+**/node_modules
+**/dist
+**/.next
+**/coverage
+**/*.log
+**/.DS_Store
+.env
+.env.*
+!.env.example
+apps/api/test
+apps/api/eval
+apps/web/test
