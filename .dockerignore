@@ -8,8 +8,8 @@ docs
 **/coverage
 **/*.log
 **/.DS_Store
-.env
-.env.*
+**/.env
+**/.env.*
 !.env.example
 apps/api/test
 apps/api/eval
