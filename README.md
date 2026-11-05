@@ -52,6 +52,17 @@ npm run dev:web               # http://localhost:3000  (second terminal)
 
 Port 5432 taken? Set DB_PORT in .env and update DATABASE_URL to match.
 
+### Run everything with Docker
+
+No Node needed: `docker compose up --build` starts Postgres, the API and the web app, using the same `.env` as local development (without one it runs on the mock providers). Open http://localhost:3000.
+
+- Every port is published on `127.0.0.1` only, so nothing is reachable from other machines. A public deployment needs a reverse proxy and HTTPS (a separate guide).
+- `CORS_ORIGIN` in `.env` must be the address you open the web app at. The default matches port 3000; if you set `WEB_PORT`, change `CORS_ORIGIN` to match.
+- `NEXT_PUBLIC_API_URL` is baked into the web image when it is built. After changing it, rebuild: `docker compose build web && docker compose up -d`. If you change `API_PORT`, set `NEXT_PUBLIC_API_URL=http://localhost:<API_PORT>` in `.env` as well (the `.env.example` copy still says 4000), then rebuild.
+- Inside the stack the API reaches the database at `db:5432`, whatever `DATABASE_URL` says in `.env`. Other addresses in `.env` are not rewritten: `localhost` inside the container is the container itself, so a model server on your machine (for example `OPENAI_BASE_URL=http://localhost:11434/v1` for Ollama) must be written as `http://host.docker.internal:11434/v1` here (on Linux, also add `extra_hosts: ["host.docker.internal:host-gateway"]` to the `api` service).
+- `docker compose down` keeps your documents in the `rag-data` volume; `docker compose down -v` deletes them.
+- For the read-only public demo, set `DEMO_MODE=true` in `.env` first (see [Running a public demo](#running-a-public-demo)).
+
 ### Try it (no technical knowledge needed)
 
 Once both servers are running, open the web app in your browser (http://localhost:3000). The two sample documents are already loaded, so just type a question into the box at the bottom and press **Ask**. Each answer shows numbered sources underneath, so you can see exactly where it came from.
@@ -167,6 +178,7 @@ apps/
       seed.ts             index /samples
     test/                 unit + e2e (pgvector) tests
   web/                    Next.js (App Router) chat UI
+  */Dockerfile            multi-stage images, built from the repo root (see docker-compose.yml)
 samples/                  fictional docs to try it with
 ```
 

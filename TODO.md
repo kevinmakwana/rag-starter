@@ -40,10 +40,10 @@ Retrieval quality and answer quality:
 
 Deployment and operations:
 
-- [ ] **Dockerfiles and a full compose stack.** `docker-compose.yml` only runs Postgres today; add images for the API and web app so the whole stack starts with one command.
+- [x] **Dockerfiles and a full compose stack.** Multi-stage images for the API and web app (non-root, production dependencies only), `docker compose up --build` runs the whole stack, and every published port, including the database, binds to `127.0.0.1`. `NEXT_PUBLIC_API_URL` is a build argument of the web image; CI builds both images.
 - [x] **Rate limiting.** Two tiers (general, and a lower one for routes that call a model) per user or, with auth off, per client IP, in memory; `429` with `Retry-After`; an explicit JSON body limit that fits the 500,000-character document cap.
 - [x] **Demo mode.** `DEMO_MODE=true`: a deny-by-default read-only guard, samples indexed at startup, a global daily question cap, and a read-only web UI with starter questions.
-- [ ] **Public deployment guide.** HTTPS behind a reverse proxy, `TRUST_PROXY`, the database bound to localhost (compose currently publishes `5432` on all interfaces with password `rag`), `NEXT_PUBLIC_API_URL` set at build time, and a spend cap at the model provider.
+- [ ] **Public deployment guide.** HTTPS behind a reverse proxy, `TRUST_PROXY`, a database password other than the default `rag` (compose now binds the database to localhost), `NEXT_PUBLIC_API_URL` set at build time, and a spend cap at the model provider.
 - [ ] **Real migrations.** Replace the inline `ALTER ... IF NOT EXISTS` statements in `database.service.ts` with versioned migrations once the schema changes again.
 - [ ] **Observability.** Structured logs with request IDs, latency and token counts per query, optionally OpenTelemetry.
 - [ ] **OpenAPI docs.** Generate Swagger docs for the API.

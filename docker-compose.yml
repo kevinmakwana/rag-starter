@@ -5,8 +5,9 @@ services:
       POSTGRES_USER: rag
       POSTGRES_PASSWORD: rag
       POSTGRES_DB: rag
+    # Published on this machine only. A public deployment must not expose the database at all.
     ports:
-      - "${DB_PORT:-5432}:5432"
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
     volumes:
       - rag-data:/var/lib/postgresql/data
     healthcheck:
@@ -14,6 +15,53 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    # The same .env as local development; a fresh clone without one runs on the mock providers.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Only what differs inside the compose network. Values here win over env_file.
+      DATABASE_URL: postgres://rag:rag@db:5432/rag
+      API_PORT: "4000"
+    ports:
+      - "127.0.0.1:${API_PORT:-4000}:4000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        # Inlined into the browser bundle: changing it needs `docker compose build web`.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:${API_PORT:-4000}}
+    # CORS_ORIGIN in .env must be the address you open this at (http://localhost:3000 unless WEB_PORT is set).
+    ports:
+      - "127.0.0.1:${WEB_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    restart: unless-stopped
 
 volumes:
   rag-data:

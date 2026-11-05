@@ -39,3 +39,5 @@ jobs:
         env:
           E2E_DATABASE_URL: postgres://rag:rag@localhost:5432/rag_test
       - run: npm run build
+      - name: Build the Docker images
+        run: docker compose build
