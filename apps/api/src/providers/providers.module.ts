@@ -28,7 +28,8 @@ export function createEmbeddingProvider(cfg: AppConfig): EmbeddingProvider {
 export function createChatProvider(cfg: AppConfig): ChatProvider {
   switch (cfg.chatProvider) {
     case 'openai':
-      return new OpenAIChatProvider(openAIClient(cfg), cfg.openai.chatModel);
+      // A custom base URL (Ollama, vLLM, ...) may not support `stream_options`, so streamed tokens stay unknown there.
+      return new OpenAIChatProvider(openAIClient(cfg), cfg.openai.chatModel, !cfg.openai.baseUrl);
     case 'anthropic':
       return new AnthropicChatProvider(
         new Anthropic({ apiKey: cfg.anthropic.apiKey }),
