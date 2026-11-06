@@ -5,6 +5,8 @@ import {
   currentRequestContext,
   recordModelCall,
   runInRequestContext,
+  runOutsideRequestContext,
+  startModelCall,
   summariseCalls,
 } from '../src/observability/request-context';
 
@@ -53,6 +55,48 @@ describe('request context', () => {
     ]);
     expect(a.calls.map((c) => c.inputTokens)).toEqual([1]);
     expect(b.calls.map((c) => c.inputTokens)).toEqual([2, 3]);
+  });
+});
+
+describe('startModelCall', () => {
+  it('shows a call as soon as it starts, with its tokens unknown, and fills them in when it finishes', () => {
+    const ctx: RequestContext = { requestId: 'r1', calls: [] };
+    runInRequestContext(ctx, () => {
+      const handle = startModelCall({ kind: 'chat', provider: 'p', model: 'm' });
+      // A reader that looks now (the request line of a client that already left) still sees the call.
+      expect(ctx.calls).toHaveLength(1);
+      expect(summariseCalls(ctx.calls)).toMatchObject({ calls: 1, tokensUnknown: true });
+
+      handle.finish({ inputTokens: 7, outputTokens: 3 });
+      expect(ctx.calls[0]).toMatchObject({ inputTokens: 7, outputTokens: 3 });
+      expect(ctx.calls[0].ms).toBeGreaterThanOrEqual(0);
+      expect(summariseCalls(ctx.calls)).toMatchObject({ calls: 1, inputTokens: 7, outputTokens: 3, tokensUnknown: false });
+    });
+  });
+
+  it('can finish with nothing known (a failed call)', () => {
+    const ctx: RequestContext = { requestId: 'r1', calls: [] };
+    runInRequestContext(ctx, () => startModelCall({ kind: 'chat', provider: 'p', model: 'm' }).finish({}));
+    expect(summariseCalls(ctx.calls)).toMatchObject({ calls: 1, tokensUnknown: true });
+  });
+
+  it('is a no-op outside a request', () => {
+    expect(() => startModelCall({ kind: 'chat', provider: 'p', model: 'm' }).finish({ inputTokens: 1 })).not.toThrow();
+  });
+});
+
+describe('runOutsideRequestContext', () => {
+  it('hides the current request, so work started from a request (a background job) is not attributed to it', async () => {
+    const ctx: RequestContext = { requestId: 'r1', calls: [] };
+    await runInRequestContext(ctx, async () => {
+      await runOutsideRequestContext(async () => {
+        await Promise.resolve();
+        expect(currentRequestContext()).toBeUndefined();
+        recordModelCall(call());
+      });
+      expect(currentRequestContext()).toBe(ctx);
+    });
+    expect(ctx.calls).toHaveLength(0);
   });
 });
 

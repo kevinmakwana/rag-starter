@@ -210,6 +210,49 @@ describe('OpenAI usage metering', () => {
     ]);
   });
 
+  it('counts a call that failed, with its tokens unknown, and still throws the original error', async () => {
+    const boom = new Error('429 rate limited');
+    const { client } = chatClient(() => {
+      throw boom;
+    });
+    let thrown: unknown;
+    const calls = await metered(async () => {
+      thrown = await new OpenAIChatProvider(client, 'gpt-x').complete(messages).catch((e) => e);
+    });
+    expect(thrown).toBe(boom);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].inputTokens).toBeUndefined();
+  });
+
+  it('counts a stream that the SDK breaks halfway, and keeps the original error', async () => {
+    const boom = new Error('connection reset');
+    const { client } = chatClient(() =>
+      (async function* () {
+        yield { choices: [{ delta: { content: 'a' } }] };
+        throw boom;
+      })(),
+    );
+    let thrown: unknown;
+    const calls = await metered(async () => {
+      try {
+        for await (const _ of new OpenAIChatProvider(client, 'gpt-x').stream(messages)) void _;
+      } catch (e) {
+        thrown = e;
+      }
+    });
+    expect(thrown).toBe(boom);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].outputTokens).toBeUndefined();
+  });
+
+  it('counts a failed embedding batch too', async () => {
+    const client = { embeddings: { create: async () => { throw new Error('boom'); } } } as any;
+    const calls = await metered(() => new OpenAIEmbeddingProvider(client, 'text-embedding-3-small', 2).embed(['a']).catch(() => undefined));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ kind: 'embedding' });
+    expect(calls[0].inputTokens).toBeUndefined();
+  });
+
   it('works unchanged outside a request (no context to record into)', async () => {
     const { client } = chatClient(() => ({ choices: [{ message: { content: ' ok ' } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }));
     await expect(new OpenAIChatProvider(client, 'gpt-x').complete(messages)).resolves.toBe('ok');
@@ -218,6 +261,18 @@ describe('OpenAI usage metering', () => {
 
 describe('Anthropic usage metering', () => {
   const messages = [{ role: 'user' as const, content: 'hi' }];
+
+  it('counts a call that failed, with its tokens unknown, and still throws the original error', async () => {
+    const boom = new Error('overloaded');
+    const client = { messages: { create: async () => { throw boom; } } } as any;
+    let thrown: unknown;
+    const calls = await metered(async () => {
+      thrown = await new AnthropicChatProvider(client, 'claude-x').complete(messages).catch((e) => e);
+    });
+    expect(thrown).toBe(boom);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].inputTokens).toBeUndefined();
+  });
 
   it('records the tokens of a completed answer', async () => {
     const client = {

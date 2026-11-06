@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { recordModelCall } from '../observability/request-context';
+import { startModelCall } from '../observability/request-context';
 import { ChatMessage, ChatProvider } from './types';
 
 export class AnthropicChatProvider implements ChatProvider {
@@ -24,11 +24,11 @@ export class AnthropicChatProvider implements ChatProvider {
   }
 
   async *stream(messages: ChatMessage[], signal?: AbortSignal): AsyncGenerator<string> {
-    const started = Date.now();
+    const call = startModelCall({ kind: 'chat', provider: this.name, model: this.model });
     let inputTokens: number | undefined;
     let outputTokens: number | undefined;
-    const stream = this.client.messages.stream(this.toRequest(messages), { signal });
     try {
+      const stream = this.client.messages.stream(this.toRequest(messages), { signal });
       for await (const event of stream) {
         if (event.type === 'message_start') inputTokens = event.message.usage.input_tokens;
         // Cumulative: each message_delta carries the total output tokens so far.
@@ -36,33 +36,24 @@ export class AnthropicChatProvider implements ChatProvider {
         else if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') yield event.delta.text;
       }
     } finally {
-      // An abandoned stream never reaches its final message_delta, so outputTokens stays unknown.
-      recordModelCall({
-        kind: 'chat',
-        provider: this.name,
-        model: this.model,
-        inputTokens,
-        outputTokens,
-        ms: Date.now() - started,
-      });
+      // An abandoned or broken stream never reaches its final message_delta, so outputTokens stays unknown.
+      call.finish({ inputTokens, outputTokens });
     }
   }
 
   async complete(messages: ChatMessage[]): Promise<string> {
-    const started = Date.now();
-    const res = await this.client.messages.create(this.toRequest(messages));
-    recordModelCall({
-      kind: 'chat',
-      provider: this.name,
-      model: this.model,
-      inputTokens: res.usage?.input_tokens,
-      outputTokens: res.usage?.output_tokens,
-      ms: Date.now() - started,
-    });
-    return res.content
-      .filter((block): block is Anthropic.TextBlock => block.type === 'text')
-      .map((block) => block.text)
-      .join('')
-      .trim();
+    const call = startModelCall({ kind: 'chat', provider: this.name, model: this.model });
+    let usage: { inputTokens?: number; outputTokens?: number } = {};
+    try {
+      const res = await this.client.messages.create(this.toRequest(messages));
+      usage = { inputTokens: res.usage?.input_tokens, outputTokens: res.usage?.output_tokens };
+      return res.content
+        .filter((block): block is Anthropic.TextBlock => block.type === 'text')
+        .map((block) => block.text)
+        .join('')
+        .trim();
+    } finally {
+      call.finish(usage);
+    }
   }
 }

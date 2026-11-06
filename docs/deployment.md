@@ -137,7 +137,7 @@ docker compose logs --no-log-prefix --since 24h api | jq -sRc '
 docker compose logs --no-log-prefix api | grep THE-REQUEST-ID
 ```
 
-If `withUnknownTokens` is not 0, the token totals are a lower bound: some calls (an answer a visitor stopped reading, or a streamed answer from a custom `OPENAI_BASE_URL`) did not report their tokens. Multiply the totals by your provider's current prices to estimate the day's spend; the logs deliberately do not hard-code prices, and your provider's usage page is the authoritative number. Questions, answers and visitor addresses are not in the logs by design, so you can see how much was asked and what it cost, not what people asked.
+If `withUnknownTokens` is not 0, the token totals are a lower bound: some calls (an answer a visitor stopped reading, a call that failed, or a streamed answer from a custom `OPENAI_BASE_URL`) did not report their tokens. `inputTokens` adds chat prompt tokens and the question-embedding tokens, which are priced differently; in the read-only demo the embeddings are short questions, so they are a small share, but price them separately if you also let people upload documents. Multiply the totals by your provider's current prices for a rough idea of the day's spend; the logs deliberately do not hard-code prices, and your provider's usage page is the authoritative number. Background jobs (uploads, re-indexing) are not in these lines. Questions, answers and visitor addresses are not in the logs by design, so you can see how much was asked and what it cost, not what people asked.
 
 ## Check that visitors are told apart
 

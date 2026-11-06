@@ -230,12 +230,12 @@ Limits worth knowing: the daily cap protects your bill, not availability. One ad
 
 ## Logs and usage
 
-Every response carries an `X-Request-Id` header (a client-sent one is kept only if it is 8-64 plain characters), and every request writes one line when it finishes: method, the route pattern (`/documents/:id`, never the real path or query string), status, duration, and `aborted` if the client left first. Successful `GET /health` calls are not logged. Questions, answers, document text and IP addresses are never logged.
+Every response carries an `X-Request-Id` header (a client-sent one is kept only if it is 8-64 plain characters), and every request writes one line when it finishes: method, the route pattern (`/documents/:id`, never the real path or query string), status, duration, and `aborted` if the client left first. Successful `GET /health` calls are not logged. The request lines never contain questions, answers, document text or IP addresses. (Messages the documents service writes while indexing do include document titles.)
 
-A question's line adds what it cost:
+A question's line adds what it cost. In `LOG_FORMAT=json` that is the `query` and `usage` objects below; in `text` it is the request id, `model-calls=N` and `tokens=in/out` (a trailing `+` means the tokens are a lower bound), without the `query` timings:
 
 - `query`: `retrieveMs`, `answerMs`, `rewriteMs` (only for a follow-up that was rewritten), `retrieved` (passages found) and `citationsMissing`.
-- `usage`: `calls` (model calls, including the rewrite and re-ranking), `inputTokens`, `outputTokens`, and `tokensUnknown`, which is `true` when some call did not report its tokens (the totals are then a lower bound). OpenAI and Anthropic report tokens; the mock providers report none. A streamed OpenAI answer reports tokens only against OpenAI itself, not against a custom `OPENAI_BASE_URL`, and an answer the visitor abandons mid-stream has none.
+- `usage`: `calls` (model calls started for this request, including the rewrite, re-ranking and the question's embedding, and including calls that failed or that a visitor abandoned), `inputTokens`, `outputTokens`, and `tokensUnknown`, which is `true` when some call did not report its tokens, so the totals are a lower bound. `inputTokens` adds chat prompt tokens and embedding tokens, which providers price differently. OpenAI and Anthropic report tokens. The mock providers are not metered at all: their requests have no `usage` field. A streamed OpenAI answer reports tokens only against OpenAI itself, not against a custom `OPENAI_BASE_URL`; a failed call, and an answer the visitor abandons mid-stream, are counted with unknown tokens. Model calls made by background jobs (uploads, pasted text, re-indexing) are not attributed to any request and are not in these lines.
 
 `LOG_FORMAT=json` makes Nest's own log lines JSON too, so one `jq` filter reads the whole log (see [docs/deployment.md](docs/deployment.md#reading-the-logs)). There is no metrics endpoint or OpenTelemetry export yet; the request context in `src/observability/` is where one would hook in.
 

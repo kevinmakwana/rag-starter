@@ -355,6 +355,31 @@ describeIfDb('API (e2e)', () => {
       }
     };
 
+    it('does not charge a queued job\u2019s model calls to the request that queued it', async () => {
+      const { recordModelCall, runInRequestContext } = await import('../src/observability/request-context');
+      const embeddings = app.get<EmbeddingProvider>(EMBEDDING_PROVIDER);
+      const original = embeddings.embed.bind(embeddings);
+      embeddings.embed = async (texts) => {
+        recordModelCall({ kind: 'embedding', provider: 'test', model: 'm', inputTokens: 1, outputTokens: 0, ms: 1 });
+        return original(texts);
+      };
+      try {
+        const ctx = { requestId: 'queued-from-this-request', calls: [] as any[] };
+        const view = await runInRequestContext(ctx, () =>
+          app.get(JobsService).enqueue('ingest_text', {
+            title: 'Context check',
+            payload: { title: 'Context check', content: '# Context check\n\nThe lift is on the left.' },
+          }),
+        );
+        const job = await settled(view.id);
+        expect(job.status).toBe('succeeded');
+        expect(ctx.calls).toHaveLength(0); // the job's embedding call is not this request's
+        await rm(job.result.id);
+      } finally {
+        embeddings.embed = original;
+      }
+    });
+
     it('indexes pasted text in the background and reports the result', async () => {
       const res = await enqueue('documents', { title: 'Queued', content: '# Queued\n\n## Parking\n\nVisitors park in bay C.' });
 

@@ -1,7 +1,7 @@
 import express from 'express';
 import type { AddressInfo } from 'node:net';
 import { accessLogMiddleware, formatText } from '../src/observability/access-log';
-import { annotateQuery, recordModelCall } from '../src/observability/request-context';
+import { annotateQuery, recordModelCall, startModelCall } from '../src/observability/request-context';
 
 async function serve() {
   const lines: string[] = [];
@@ -17,6 +17,12 @@ async function serve() {
   app.get('/slow-stream', (_req, res) => {
     res.write('partial');
     // never ends: the client walks away
+  });
+  app.get('/pending-model', (_req, res) => {
+    // A model call is in flight when the visitor leaves, and it only reports back afterwards.
+    const call = startModelCall({ kind: 'chat', provider: 'p', model: 'm' });
+    res.once('close', () => setTimeout(() => call.finish({ inputTokens: 40, outputTokens: 2 }), 30));
+    res.write('partial');
   });
   const server = app.listen(0);
   await new Promise((resolve) => server.once('listening', resolve));
@@ -111,6 +117,25 @@ describe('access log middleware', () => {
     await pending;
     await s.waitForLines(1);
     expect(JSON.parse(s.lines[0])).toMatchObject({ route: '/slow-stream', aborted: true });
+  });
+});
+
+describe('access log for an abandoned request whose model call is still running', () => {
+  it('counts that call, with its tokens unknown, instead of leaving it out of the line', async () => {
+    const s = await serve();
+    try {
+      const controller = new AbortController();
+      const pending = fetch(`${s.base}/pending-model`, { signal: controller.signal }).catch(() => undefined);
+      await new Promise((r) => setTimeout(r, 100));
+      controller.abort();
+      await pending;
+      await s.waitForLines(1);
+      const line = JSON.parse(s.lines[0]);
+      expect(line.aborted).toBe(true);
+      expect(line.usage).toMatchObject({ calls: 1, tokensUnknown: true });
+    } finally {
+      await s.close();
+    }
   });
 });
 
