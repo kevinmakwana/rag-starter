@@ -41,3 +41,8 @@ jobs:
       - run: npm run build
       - name: Build the Docker images
         run: docker compose build
+      - name: Validate the production overlay
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q
+        env:
+          SITE_ADDRESS: ci.example.test
+          POSTGRES_PASSWORD: ci-only

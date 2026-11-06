@@ -1,0 +1,49 @@
+# Production overlay: put Caddy (automatic HTTPS) in front and publish nothing else.
+# Use it together with docker-compose.yml; see docs/deployment.md.
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+# or set COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml in .env (see .env.production.example).
+# Needs Docker Compose 2.24 or newer (`!reset`).
+
+services:
+  db:
+    environment:
+      # Applied when the database volume is first created. See "Changing the database password" in the guide.
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (for example openssl rand -hex 24)}"
+    ports: !reset []
+
+  api:
+    environment:
+      DATABASE_URL: "postgres://rag:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/rag"
+      # Exactly one proxy (Caddy) sits in front, and it replaces any client-supplied X-Forwarded-For.
+      TRUST_PROXY: "1"
+      CORS_ORIGIN: "https://${SITE_ADDRESS:?set SITE_ADDRESS to your domain, for example demo.example.com}"
+    ports: !reset []
+
+  web:
+    build:
+      args:
+        NEXT_PUBLIC_API_URL: "https://${SITE_ADDRESS:?set SITE_ADDRESS to your domain}/api"
+    ports: !reset []
+
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      SITE_ADDRESS: "${SITE_ADDRESS:?set SITE_ADDRESS to your domain}"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  caddy-data:
+  caddy-config:

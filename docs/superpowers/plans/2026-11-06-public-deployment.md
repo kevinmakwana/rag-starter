@@ -67,27 +67,27 @@ services:
   db:
     environment:
       # Applied when the database volume is first created. See "Changing the database password" in the guide.
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (for example: openssl rand -hex 24)}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (for example openssl rand -hex 24)}"
     ports: !reset []
 
   api:
     environment:
-      DATABASE_URL: postgres://rag:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/rag
+      DATABASE_URL: "postgres://rag:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/rag"
       # Exactly one proxy (Caddy) sits in front, and it replaces any client-supplied X-Forwarded-For.
       TRUST_PROXY: "1"
-      CORS_ORIGIN: https://${SITE_ADDRESS:?set SITE_ADDRESS to your domain, for example demo.example.com}
+      CORS_ORIGIN: "https://${SITE_ADDRESS:?set SITE_ADDRESS to your domain, for example demo.example.com}"
     ports: !reset []
 
   web:
     build:
       args:
-        NEXT_PUBLIC_API_URL: https://${SITE_ADDRESS:?set SITE_ADDRESS to your domain}/api
+        NEXT_PUBLIC_API_URL: "https://${SITE_ADDRESS:?set SITE_ADDRESS to your domain}/api"
     ports: !reset []
 
   caddy:
     image: caddy:2-alpine
     environment:
-      SITE_ADDRESS: ${SITE_ADDRESS:?set SITE_ADDRESS to your domain}
+      SITE_ADDRESS: "${SITE_ADDRESS:?set SITE_ADDRESS to your domain}"
     ports:
       - "80:80"
       - "443:443"
@@ -239,14 +239,19 @@ Expected: the first three print `200`, the next three `429`, although every requ
 
 - [ ] **Step 9: The password is real, and data survives a restart**
 
+The Postgres image trusts connections from inside its own container, so test the password from a *different* container on the compose network, which is how the API connects:
+
 ```bash
-docker compose $P exec -T -e PGPASSWORD=rag db psql -h 127.0.0.1 -U rag -d rag -c 'select 1' 2>&1 | tail -2
-docker compose $P exec -T -e PGPASSWORD="$POSTGRES_PASSWORD" db psql -h 127.0.0.1 -U rag -d rag -tAc 'select count(*) from documents'
+PW=$(docker compose $P exec -T api printenv DATABASE_URL | sed -E 's#.*rag:([^@]*)@.*#\1#')
+NET=ragprod_default
+docker run --rm --network $NET -e PGPASSWORD=rag pgvector/pgvector:pg16 psql -h db -U rag -d rag -tAc 'select 1' 2>&1 | tail -1
+docker run --rm --network $NET -e PGPASSWORD="$PW" pgvector/pgvector:pg16 psql -h db -U rag -d rag -tAc 'select 1' 2>&1 | tail -1
+docker compose $P exec -T db psql -U rag -d rag -tAc 'select count(*) from documents'
 docker compose $P down && docker compose $P up -d --wait >/dev/null 2>&1
 curl -sk $B/api/documents | grep -o '"title":"[^"]*"' | wc -l
 ```
 
-Expected: the first command reports `password authentication failed for user "rag"`; the second prints `2`; after `down` and `up` (no `-v`) the document count is still `2`.
+Expected: the first command reports `password authentication failed for user "rag"`; the second prints `1`; the count is `2`; after `down` and `up` (no `-v`) the document count is still `2`.
 
 - [ ] **Step 10: The local workflow is unchanged, then add the CI validation and commit**
 
