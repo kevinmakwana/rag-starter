@@ -2,6 +2,7 @@ import { ArgumentsHost, Catch, ExceptionFilter, Logger } from '@nestjs/common';
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { Response } from 'express';
+import { currentRequestId } from '../observability/request-context';
 
 /** Turn upstream LLM failures into a clear 502 instead of an opaque 500. */
 @Catch(OpenAI.APIError, Anthropic.APIError)
@@ -9,7 +10,7 @@ export class ProviderErrorFilter implements ExceptionFilter {
   private readonly logger = new Logger('ProviderError');
 
   catch(err: InstanceType<typeof OpenAI.APIError> | InstanceType<typeof Anthropic.APIError>, host: ArgumentsHost) {
-    this.logger.error(`${err.status ?? '?'} ${err.message}`);
+    this.logger.error(`${err.status ?? '?'} ${err.message} (req=${currentRequestId() ?? '-'})`);
     host
       .switchToHttp()
       .getResponse<Response>()

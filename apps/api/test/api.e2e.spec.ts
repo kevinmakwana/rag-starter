@@ -1031,5 +1031,6 @@ describeIfDb('request ids on the real routes (e2e)', () => {
     }
     const line = JSON.parse(lines.find((l) => l.includes('my-trace-id-0001'))!);
     expect(line).toMatchObject({ context: 'http', route: '/query/stream', status: 200, requestId: 'my-trace-id-0001' });
+    expect(line.query).toMatchObject({ retrieved: expect.any(Number), retrieveMs: expect.any(Number) });
   });
 });
