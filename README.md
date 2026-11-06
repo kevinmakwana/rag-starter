@@ -56,7 +56,7 @@ Port 5432 taken? Set DB_PORT in .env and update DATABASE_URL to match.
 
 No Node needed: `docker compose up --build` starts Postgres, the API and the web app, using the same `.env` as local development (without one it runs on the mock providers). Open http://localhost:3000.
 
-- Every port is published on `127.0.0.1` only, so nothing is reachable from other machines. A public deployment needs a reverse proxy and HTTPS (a separate guide).
+- Every port is published on `127.0.0.1` only, so nothing is reachable from other machines. A public deployment needs a reverse proxy and HTTPS: see [docs/deployment.md](docs/deployment.md).
 - `CORS_ORIGIN` in `.env` must be the address you open the web app at. The default matches port 3000; if you set `WEB_PORT`, change `CORS_ORIGIN` to match.
 - `NEXT_PUBLIC_API_URL` is baked into the web image when it is built. After changing it, rebuild: `docker compose build web && docker compose up -d`. If you change `API_PORT`, set `NEXT_PUBLIC_API_URL=http://localhost:<API_PORT>` in `.env` as well (the `.env.example` copy still says 4000), then rebuild.
 - Inside the stack the API reaches the database at `db:5432`, whatever `DATABASE_URL` says in `.env`. Other addresses in `.env` are not rewritten: `localhost` inside the container is the container itself, so a model server on your machine (for example `OPENAI_BASE_URL=http://localhost:11434/v1` for Ollama) must be written as `http://host.docker.internal:11434/v1` here (on Linux, also add `extra_hosts: ["host.docker.internal:host-gateway"]` to the `api` service).
@@ -222,7 +222,9 @@ Set `DEMO_MODE=true` and anyone who can reach the API can ask questions over the
 - At most `DEMO_MAX_QUERIES_PER_DAY` questions (default 500, `0` = no cap) are answered per UTC day across all visitors; after that the API answers `429` until midnight UTC.
 - The web app shows a read-only banner and clickable starter questions, and hides the upload, paste, delete and re-index controls. That is a courtesy: the API is what enforces the rules.
 
-Recommended settings for a demo on a real model: leave `API_KEYS` empty, `RATE_LIMIT_COSTLY_PER_MIN=5`, `TRUST_PROXY=1` behind one reverse proxy, HTTPS, the database not exposed to the internet, and a spend cap at your model provider.
+To put the demo on a public domain with HTTPS, a database password of your own and a spend cap, follow [docs/deployment.md](docs/deployment.md). It uses a production overlay (`docker-compose.prod.yml`, with Caddy) and the template `.env.production.example`.
+
+Recommended settings for a demo on a real model: leave `API_KEYS` empty, `RATE_LIMIT_COSTLY_PER_MIN=5`, `TRUST_PROXY=1` behind one reverse proxy, HTTPS, the database not exposed to the internet, and a spend cap at your model provider (the overlay sets everything except the spend cap).
 
 Limits worth knowing: the daily cap protects your bill, not availability. One address can use it all up (at 5 questions a minute that takes about 100 minutes), after which everyone sees "try again tomorrow". The cap and the rate limits live in the API process's memory, so they reset on a restart and several API instances multiply them. Demo mode does not filter what visitors ask.
 
