@@ -45,7 +45,7 @@ Deployment and operations:
 - [x] **Demo mode.** `DEMO_MODE=true`: a deny-by-default read-only guard, samples indexed at startup, a global daily question cap, and a read-only web UI with starter questions.
 - [x] **Public deployment guide.** `docker-compose.prod.yml` puts Caddy (automatic HTTPS) in front on one domain, publishes nothing else, and requires a database password; `docs/deployment.md` covers DNS, firewall, demo settings, the provider spend cap, updates, backups, restoring and changing the password. Real certificate issuance and client addresses on a live server are untested and flagged as such in the guide.
 - [ ] **Real migrations.** Replace the inline `ALTER ... IF NOT EXISTS` statements in `database.service.ts` with versioned migrations once the schema changes again.
-- [ ] **Observability.** Structured logs with request IDs, latency and token counts per query, optionally OpenTelemetry.
+- [x] **Observability.** `X-Request-Id` on every response and one structured log line per request (route pattern, status, duration), plus per-question phase timings and the tokens each model call used; `LOG_FORMAT=json` for jq. Questions, answers and addresses are never logged. OpenTelemetry and a metrics endpoint are not done: the request context in `src/observability/` is the hook.
 - [ ] **OpenAPI docs.** Generate Swagger docs for the API.
 
 Product:

@@ -16,6 +16,8 @@ services:
       DATABASE_URL: "postgres://rag:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/rag"
       # Exactly one proxy (Caddy) sits in front, and it replaces any client-supplied X-Forwarded-For.
       TRUST_PROXY: "1"
+      # One JSON object per line (Nest's logs and one line per request), for jq. See "Reading the logs" in the guide.
+      LOG_FORMAT: "json"
       CORS_ORIGIN: "https://${SITE_ADDRESS:?set SITE_ADDRESS to your domain, for example demo.example.com}"
     ports: !reset []
 
