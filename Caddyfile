@@ -1,0 +1,14 @@
+# {$SITE_ADDRESS} is your domain (set in .env). Caddy obtains and renews its HTTPS certificate by itself.
+{$SITE_ADDRESS} {
+	# The API lives under /api; the prefix is removed before the request reaches it.
+	# No compression here: Caddy already sends text/event-stream (streamed answers) unbuffered, and compressing
+	# would hold it back.
+	handle_path /api/* {
+		reverse_proxy api:4000
+	}
+
+	handle {
+		encode zstd gzip
+		reverse_proxy web:3000
+	}
+}
