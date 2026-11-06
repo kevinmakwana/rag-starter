@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { DEFAULT_OWNER } from '../auth/public.decorator';
 import { APP_CONFIG, AppConfig } from '../config';
 import { DatabaseService, toVector } from '../database/database.service';
+import { annotateQuery } from '../observability/request-context';
 import { CHAT_PROVIDER, ChatProvider, EMBEDDING_PROVIDER, EmbeddingProvider } from '../providers/types';
 import {
   buildMessages,
@@ -207,6 +208,16 @@ export class QueryService {
     }));
   }
 
+  /** Run `fn` and record how long it took in the request's telemetry, even when it throws. */
+  private async timed<T>(field: 'retrieveMs' | 'answerMs', fn: () => Promise<T>): Promise<T> {
+    const started = Date.now();
+    try {
+      return await fn();
+    } finally {
+      annotateQuery({ [field]: Date.now() - started });
+    }
+  }
+
   /**
    * Turn a follow-up ("and for annual plans?") into a standalone question using recent history.
    * With no history there is nothing to resolve and no model call is made; if the rewrite
@@ -216,7 +227,9 @@ export class QueryService {
     const recent = trimHistory(history, { maxMessages: this.cfg.historyMessages, maxChars: 1000 });
     if (!recent.length) return question;
     try {
+      const started = Date.now();
       const raw = await this.chat.complete(buildRewriteMessages(question, recent));
+      annotateQuery({ rewriteMs: Date.now() - started });
       const rewritten = raw.split('\n')[0].trim().replace(/^["']|["']$/g, '').slice(0, 500);
       return rewritten || question;
     } catch (err) {
@@ -228,6 +241,7 @@ export class QueryService {
   private toResult(answer: string, chunks: RetrievedChunk[], started: number, rewritten?: string): QueryResult {
     const sources = this.toSources(chunks, answer);
     const uncited = chunks.length > 0 && !isRefusal(answer) && !sources.some((s) => s.cited);
+    annotateQuery({ retrieved: chunks.length, ...(uncited ? { citationsMissing: true } : {}) });
     return {
       answer,
       sources,
@@ -262,10 +276,10 @@ export class QueryService {
   ): Promise<AnsweredQuestion> {
     const started = Date.now();
     const searchQuestion = await this.standalone(question, history);
-    const chunks = await this.retrieve(searchQuestion, topK, documentIds, owner);
+    const chunks = await this.timed('retrieveMs', () => this.retrieve(searchQuestion, topK, documentIds, owner));
 
     const answer = chunks.length
-      ? await this.chat.complete(buildMessages(searchQuestion, chunks))
+      ? await this.timed('answerMs', () => this.chat.complete(buildMessages(searchQuestion, chunks)))
       : NO_CONTEXT_ANSWER;
 
     return {
@@ -288,14 +302,19 @@ export class QueryService {
   ): AsyncGenerator<QueryStreamEvent> {
     const started = Date.now();
     const searchQuestion = await this.standalone(question, history);
-    const chunks = await this.retrieve(searchQuestion, topK, documentIds, owner);
+    const chunks = await this.timed('retrieveMs', () => this.retrieve(searchQuestion, topK, documentIds, owner));
     yield { type: 'sources', sources: this.toSources(chunks) };
 
     let answer = '';
     if (chunks.length) {
-      for await (const text of this.chat.stream(buildMessages(searchQuestion, chunks), signal)) {
-        answer += text;
-        yield { type: 'token', text };
+      const answerStarted = Date.now();
+      try {
+        for await (const text of this.chat.stream(buildMessages(searchQuestion, chunks), signal)) {
+          answer += text;
+          yield { type: 'token', text };
+        }
+      } finally {
+        annotateQuery({ answerMs: Date.now() - answerStarted });
       }
     } else {
       answer = NO_CONTEXT_ANSWER;

@@ -24,6 +24,8 @@ export interface AppConfig {
   minScore: number;
   /** `hybrid` fuses vector search with Postgres full-text search; `vector` uses embeddings only. */
   searchMode: SearchMode;
+  /** "json" prints one JSON object per log line (for jq or a log shipper); "text" is readable in a terminal. */
+  logFormat: 'text' | 'json';
   /** Up to this many chunks, vector search is exact instead of using the approximate HNSW index (0 = always HNSW). */
   exactSearchMaxChunks: number;
   /** Hash of each accepted API key -> its user. Empty means authentication is off. */
@@ -98,6 +100,7 @@ export function loadConfig(): AppConfig {
     topK: int('TOP_K', 5),
     minScore: 0,
     searchMode: oneOf('SEARCH_MODE', ['vector', 'hybrid'] as const, 'hybrid'),
+    logFormat: oneOf('LOG_FORMAT', ['text', 'json'] as const, 'text'),
     exactSearchMaxChunks: int('EXACT_SEARCH_MAX_CHUNKS', 20000),
     auth: { keys: new Map(parseApiKeys(process.env.API_KEYS).map(({ key, user }) => [hashKey(key), user])) },
     ingestConcurrency: int('INGEST_CONCURRENCY', 2),

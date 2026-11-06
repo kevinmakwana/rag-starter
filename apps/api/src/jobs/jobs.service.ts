@@ -3,6 +3,7 @@ import { DEFAULT_OWNER } from '../auth/public.decorator';
 import { APP_CONFIG, AppConfig } from '../config';
 import { DatabaseService } from '../database/database.service';
 import { DocumentsService } from '../documents/documents.service';
+import { runOutsideRequestContext } from '../observability/request-context';
 
 export type JobKind = 'ingest_text' | 'ingest_file' | 'reindex_all';
 export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
@@ -149,7 +150,8 @@ export class JobsService implements OnApplicationBootstrap, OnModuleDestroy {
 
   /** Start as many queued jobs as there are free slots. Re-entrant calls are folded into one more pass. */
   private kick(): void {
-    void this.drain();
+    // Not in the request that queued the job: the drain loop outlives it, and its model calls are not its own.
+    runOutsideRequestContext(() => void this.drain());
   }
 
   private async drain(): Promise<void> {

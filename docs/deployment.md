@@ -111,6 +111,34 @@ docker compose up -d
 
 (On a fresh server with nothing worth keeping, the simpler route is to remove only the database volume and start again: `docker compose down`, then `docker volume rm <folder>_rag-data` (the folder is the one you cloned into, for example `rag-starter_rag-data`; `docker volume ls` shows it), then `docker compose up -d`. Avoid `docker compose down -v` for this: it also deletes the certificates, and asking Let's Encrypt for a new one repeatedly runs into its weekly limit.) Use letters and digits only, because the password is placed in a URL.
 
+## Reading the logs
+
+With the production overlay the API writes one JSON object per line: Nest's own logs, and one line per request (see "Logs and usage" in the README for every field). Install `jq` on the server (`sudo apt install jq`). The filters below skip lines that are not JSON, because a couple of start-up lines are plain text.
+
+```bash
+# every request
+docker compose logs --no-log-prefix api | jq -cR 'fromjson? | select(.context=="http")'
+
+# the ten slowest requests
+docker compose logs --no-log-prefix api \
+  | jq -cR 'fromjson? | select(.context=="http") | {route, status, durationMs, requestId}' \
+  | jq -s 'sort_by(-.durationMs) | .[0:10]'
+
+# model calls and tokens in the last 24 hours
+docker compose logs --no-log-prefix --since 24h api | jq -sRc '
+  [split("\n")[] | fromjson? | select(.context=="http" and .usage) | .usage]
+  | {requests: length,
+     calls: (map(.calls) | add // 0),
+     inputTokens: (map(.inputTokens) | add // 0),
+     outputTokens: (map(.outputTokens) | add // 0),
+     withUnknownTokens: (map(select(.tokensUnknown)) | length)}'
+
+# everything logged for one request (visitors can read its id from the X-Request-Id response header)
+docker compose logs --no-log-prefix api | grep THE-REQUEST-ID
+```
+
+If `withUnknownTokens` is not 0, the token totals are a lower bound: some calls (an answer a visitor stopped reading, a call that failed, or a streamed answer from a custom `OPENAI_BASE_URL`) did not report their tokens. `inputTokens` adds chat prompt tokens and the question-embedding tokens, which are priced differently; in the read-only demo the embeddings are short questions, so they are a small share, but price them separately if you also let people upload documents. Multiply the totals by your provider's current prices for a rough idea of the day's spend; the logs deliberately do not hard-code prices, and your provider's usage page is the authoritative number. Background jobs (uploads, re-indexing) are not in these lines. Questions, answers and visitor addresses are not in the logs by design, so you can see how much was asked and what it cost, not what people asked.
+
 ## Check that visitors are told apart
 
 The rate limiter works per visitor address. Docker's port forwarding keeps the real address on a standard Linux server, but some setups (rootless Docker, certain network layers) hide it, which would put every visitor in one bucket. Test once:
@@ -132,6 +160,6 @@ If the other network also gets `429`, the API sees one address for everyone: eve
 
 ## What has and has not been tested
 
-Tested with the same files on a laptop (Caddy using its local certificate for `localhost`): the overlay refusing to start without `SITE_ADDRESS` or `POSTGRES_PASSWORD`; nothing published except Caddy; the site and the API through Caddy; the streamed answer arriving as `text/event-stream` without compression; demo-mode writes refused; the rate limit ignoring a forged `X-Forwarded-For`; the non-default password; data surviving a restart; and the backup, restore and password-change commands above.
+Tested with the same files on a laptop (Caddy using its local certificate for `localhost`): the overlay refusing to start without `SITE_ADDRESS` or `POSTGRES_PASSWORD`; nothing published except Caddy; the site and the API through Caddy; the streamed answer arriving as `text/event-stream` without compression; demo-mode writes refused; the rate limit ignoring a forged `X-Forwarded-For`; the non-default password; data surviving a restart; the backup, restore and password-change commands above; and the log lines and the `jq` filters in "Reading the logs" against real output (token totals against a synthetic log, because the mock providers used here report no tokens).
 
 Not tested here, because it needs a real domain and server: certificate issuance from Let's Encrypt, DNS, the redirect from port 80, client addresses on a real network (use the check above), IPv6 (which is why the guide tells you not to publish an `AAAA` record), and the `docker compose pull caddy db` update step (the Docker daemon on the test machine could not pull images at that time).

@@ -228,6 +228,17 @@ Recommended settings for a demo on a real model: leave `API_KEYS` empty, `RATE_L
 
 Limits worth knowing: the daily cap protects your bill, not availability. One address can use it all up (at 5 questions a minute that takes about 100 minutes), after which everyone sees "try again tomorrow". The cap and the rate limits live in the API process's memory, so they reset on a restart and several API instances multiply them. Demo mode does not filter what visitors ask.
 
+## Logs and usage
+
+Every response carries an `X-Request-Id` header (a client-sent one is kept only if it is 8-64 plain characters), and every request writes one line when it finishes: method, the route pattern (`/documents/:id`, never the real path or query string), status, duration, and `aborted` if the client left first. Successful `GET /health` calls are not logged. The request lines never contain questions, answers, document text or IP addresses. (Messages the documents service writes while indexing do include document titles.)
+
+A question's line adds what it cost. In `LOG_FORMAT=json` that is the `query` and `usage` objects below; in `text` it is the request id, `model-calls=N` and `tokens=in/out` (a trailing `+` means the tokens are a lower bound), without the `query` timings:
+
+- `query`: `retrieveMs`, `answerMs`, `rewriteMs` (only for a follow-up that was rewritten), `retrieved` (passages found) and `citationsMissing`.
+- `usage`: `calls` (model calls started for this request, including the rewrite, re-ranking and the question's embedding, and including calls that failed or that a visitor abandoned), `inputTokens`, `outputTokens`, and `tokensUnknown`, which is `true` when some call did not report its tokens, so the totals are a lower bound. `inputTokens` adds chat prompt tokens and embedding tokens, which providers price differently. OpenAI and Anthropic report tokens. The mock providers are not metered at all: their requests have no `usage` field. A streamed OpenAI answer reports tokens only against OpenAI itself, not against a custom `OPENAI_BASE_URL`; a failed call, and an answer the visitor abandons mid-stream, are counted with unknown tokens. Model calls made by background jobs (uploads, pasted text, re-indexing) are not attributed to any request and are not in these lines.
+
+`LOG_FORMAT=json` makes Nest's own log lines JSON too, so one `jq` filter reads the whole log (see [docs/deployment.md](docs/deployment.md#reading-the-logs)). There is no metrics endpoint or OpenTelemetry export yet; the request context in `src/observability/` is where one would hook in.
+
 ## Background jobs
 
 Slow work (parsing a big PDF, embedding hundreds of chunks, re-indexing everything) can run as a job instead of holding a request open. The queue is a Postgres table worked off inside the API process (`INGEST_CONCURRENCY`, default 2), so it needs no extra service. Queued jobs survive a restart; a job that was *running* when the server stopped is marked failed, not retried, because retrying a file that crashed the parser could loop forever. That recovery assumes a single API process (claiming jobs is safe with several; recovery would fail another instance's live jobs). Uploaded bytes and pasted text are deleted from the job row as soon as it finishes, and finished jobs are purged after 7 days. The web app uses jobs for uploads, pasted text and **Re-index all**.
