@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { Logger } from '@nestjs/common';
+import { ConsoleLogger, Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
@@ -7,8 +7,10 @@ import { configureApp } from './app.setup';
 import { APP_CONFIG, AppConfig } from './config';
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { bufferLogs: true });
   const cfg = app.get<AppConfig>(APP_CONFIG);
+  // JSON lines for every Nest log too, so the whole log can be filtered with jq. Buffered logs are replayed through it.
+  if (cfg.logFormat === 'json') app.useLogger(new ConsoleLogger({ json: true }));
 
   configureApp(app, cfg);
   app.enableShutdownHooks();

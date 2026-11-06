@@ -4,6 +4,7 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import { json } from 'express';
 import { ProviderErrorFilter } from './common/provider-error.filter';
 import { AppConfig } from './config';
+import { accessLogMiddleware, LogSink } from './observability/access-log';
 
 /**
  * Document text is capped at 500,000 characters, and JSON escaping can turn one character into six
@@ -18,11 +19,14 @@ export const DOCUMENT_BODY_LIMIT = '4mb';
 export const JSON_BODY_LIMIT = '512kb';
 
 /** Everything main.ts sets up, shared with the tests so they run the same configuration. */
-export function configureApp(app: NestExpressApplication, cfg: AppConfig): void {
+export function configureApp(app: NestExpressApplication, cfg: AppConfig, accessLogSink?: LogSink): void {
+  // First, so every response (including a CORS preflight or a rejected request) carries an id and gets a line.
+  app.use(accessLogMiddleware(cfg.logFormat, accessLogSink));
   app.enableCors({
     origin: cfg.corsOrigin.split(',').map((o) => o.trim()),
-    // Browsers hide other response headers from scripts; the web app shows "try again in N seconds".
-    exposedHeaders: ['Retry-After'],
+    // Browsers hide other response headers from scripts; the web app shows "try again in N seconds",
+    // and a visitor can quote the request id when reporting a problem.
+    exposedHeaders: ['Retry-After', 'X-Request-Id'],
   });
   // Trust no proxy unless told to: otherwise anyone could pick their own IP with X-Forwarded-For.
   app.set('trust proxy', cfg.trustProxy);

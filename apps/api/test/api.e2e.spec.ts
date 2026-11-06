@@ -965,3 +965,71 @@ describeIfDb('demo mode on the real routes (e2e)', () => {
     expect((await send('GET', '/documents')).status).toBe(200); // reads are not questions
   });
 });
+
+/**
+ * Request ids on the real routes. In this file for the same reason as the blocks above: one worker per database.
+ */
+describeIfDb('request ids on the real routes (e2e)', () => {
+  let app: INestApplication;
+  let base: string;
+
+  beforeAll(async () => {
+    Object.assign(process.env, {
+      DATABASE_URL: DB,
+      EMBEDDING_PROVIDER: 'mock',
+      CHAT_PROVIDER: 'mock',
+      EMBEDDING_DIM: '256',
+      API_KEYS: '',
+      DEMO_MODE: '',
+      RATE_LIMIT_PER_MIN: '0',
+      RATE_LIMIT_COSTLY_PER_MIN: '0',
+      LOG_FORMAT: 'json',
+    });
+    const { AppModule } = await import('../src/app.module');
+    const { configureApp } = await import('../src/app.setup');
+    const { APP_CONFIG } = await import('../src/config');
+    const nest = await NestFactory.create<NestExpressApplication>(AppModule, { logger: false });
+    // Collect the access lines instead of printing them.
+    (globalThis as { __accessLines?: string[] }).__accessLines = [];
+    configureApp(nest, nest.get(APP_CONFIG), (line) => (globalThis as any).__accessLines.push(line));
+    await nest.listen(0);
+    app = nest;
+    base = `http://127.0.0.1:${(nest.getHttpServer().address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    delete process.env.LOG_FORMAT;
+    await app?.close();
+  });
+
+  it('gives a normal response an X-Request-Id, and lets a browser page read it', async () => {
+    const res = await fetch(`${base}/documents`, { headers: { origin: 'http://localhost:3000' } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('x-request-id')).toMatch(/^[0-9a-f-]{36}$/);
+    expect(res.headers.get('access-control-expose-headers')).toContain('X-Request-Id');
+  });
+
+  it('puts the same id on the SSE stream, whose headers the controller writes itself, and on a 404', async () => {
+    const stream = await fetch(`${base}/query/stream`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-request-id': 'my-trace-id-0001' },
+      body: JSON.stringify({ question: 'anything?' }),
+    });
+    expect(stream.headers.get('content-type')).toContain('text/event-stream');
+    expect(stream.headers.get('x-request-id')).toBe('my-trace-id-0001');
+    await stream.text();
+
+    const missing = await fetch(`${base}/no-such-route`);
+    expect(missing.status).toBe(404);
+    expect(missing.headers.get('x-request-id')).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it('writes one access line for the stream with its route pattern and the id the client sent', async () => {
+    const lines: string[] = (globalThis as any).__accessLines;
+    for (let i = 0; i < 100 && !lines.some((l) => l.includes('my-trace-id-0001')); i++) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const line = JSON.parse(lines.find((l) => l.includes('my-trace-id-0001'))!);
+    expect(line).toMatchObject({ context: 'http', route: '/query/stream', status: 200, requestId: 'my-trace-id-0001' });
+  });
+});
