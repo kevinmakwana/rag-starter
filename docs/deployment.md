@@ -18,7 +18,7 @@ Only Caddy is reachable from the internet. The API, the web app and the database
 
 ## Steps
 
-1. **Point your domain at the server.** Create an `A` record (and `AAAA` if the server has IPv6) for the name you will use, for example `demo.example.com`. Check it with `dig +short demo.example.com`; it should print the server's address. Caddy cannot get a certificate until this works.
+1. **Point your domain at the server.** Create an `A` record for the name you will use, for example `demo.example.com`, and use **one name only**. Do not add an `AAAA` (IPv6) record: with Docker's default networking, IPv6 visitors reach the API through Docker's port forwarding and appear to it as one shared address, so they would all share a single rate limit. (Add one only after you have enabled IPv6 for Docker and passed the check below with `curl -6`.) Check the record with `getent hosts demo.example.com`; it should print the server's address. Caddy cannot get a certificate until this works.
 
 2. **Open the firewall for SSH, HTTP and HTTPS only.** For example with ufw: `sudo ufw allow 22/tcp && sudo ufw allow 80/tcp && sudo ufw allow 443 && sudo ufw enable`. Docker edits the firewall rules itself for ports it publishes and can bypass ufw, so the rule of this setup is: never add a `ports:` entry for `db`, `api` or `web`.
 
@@ -41,7 +41,7 @@ Only Caddy is reachable from the internet. The API, the web app and the database
    docker compose logs -f caddy      # wait for "certificate obtained successfully", then Ctrl+C
    ```
 
-   The first start builds the images (a few minutes). The `.env` file tells Compose to use the production overlay, `docker-compose.prod.yml`. If `SITE_ADDRESS` or `POSTGRES_PASSWORD` is missing, Compose stops with a message naming it.
+   The first start builds the images (a few minutes). The `.env` file tells Compose to use the production overlay, `docker-compose.prod.yml`. If `SITE_ADDRESS` or `POSTGRES_PASSWORD` is missing, Compose stops with a message naming it. If it ends with "api is unhealthy" or "dependency failed to start", run `docker compose logs api`: it names the problem, for example `OPENAI_API_KEY is required when an OpenAI provider is selected`. Fix `.env` and run `docker compose up -d` again.
 
 5. **Check it works** (replace the domain):
 
@@ -51,6 +51,14 @@ Only Caddy is reachable from the internet. The API, the web app and the database
    curl -s -o /dev/null -w "%{http_code}\n" -X POST https://demo.example.com/api/documents \
      -H 'content-type: application/json' -d '{"title":"x","content":"y"}'      # 403 in demo mode
    ```
+
+   Then check that the sample documents were indexed, which needs a working provider key:
+
+   ```bash
+   docker compose logs api | grep -i "sample documents"
+   ```
+
+   You want `Sample documents ready (2 added)`. If you see `Could not index the sample documents: …` instead, the API is running but the demo has nothing to search: the key or the provider settings in `.env` are wrong. Fix them, run `docker compose up -d` (it recreates `api`, which indexes the samples again), and repeat the check. The health check above passes either way.
 
    Then open the site in a browser and ask one of the starter questions. From outside the server, ports other than 22, 80 and 443 should be closed (try `nc -vz demo.example.com 5432`: it must fail).
 
@@ -74,7 +82,7 @@ The daily cap bounds how many questions are answered, but the only hard limit on
 ## Operating it
 
 - **Logs:** `docker compose logs -f api` (or `web`, `caddy`, `db`).
-- **Update:** `git pull && docker compose up -d --build`. The web image is rebuilt because the API address is baked into it.
+- **Update:** `git pull && docker compose pull caddy db && docker compose up -d --build --pull always`. The first pull refreshes the Caddy and Postgres images (Caddy is what faces the internet, so keep it current), `--pull always` refreshes the Node base images the app is built on, and the web image is rebuilt because the API address is baked into it.
 - **Stop:** `docker compose down` keeps the data. `docker compose down -v` deletes the database and the certificates, so only use it when you mean it.
 - **Back up** (the documents and their vectors are in Postgres):
 
@@ -101,17 +109,19 @@ nano .env                      # set POSTGRES_PASSWORD to the same value
 docker compose up -d
 ```
 
-(The simpler route on a fresh server with nothing worth keeping is `docker compose down -v` and a new start.) Use letters and digits only, because the password is placed in a URL.
+(On a fresh server with nothing worth keeping, the simpler route is to remove only the database volume and start again: `docker compose down`, then `docker volume rm <folder>_rag-data` (the folder is the one you cloned into, for example `rag-starter_rag-data`; `docker volume ls` shows it), then `docker compose up -d`. Avoid `docker compose down -v` for this: it also deletes the certificates, and asking Let's Encrypt for a new one repeatedly runs into its weekly limit.) Use letters and digits only, because the password is placed in a URL.
 
 ## Check that visitors are told apart
 
 The rate limiter works per visitor address. Docker's port forwarding keeps the real address on a standard Linux server, but some setups (rootless Docker, certain network layers) hide it, which would put every visitor in one bucket. Test once:
 
 1. Temporarily set `RATE_LIMIT_COSTLY_PER_MIN=3` in `.env` and run `docker compose up -d`.
-2. From your laptop, ask four questions within a minute (`curl -s -X POST https://demo.example.com/api/query -H 'content-type: application/json' -d '{"question":"What is the refund policy?"}'`). The fourth must return `429`.
-3. From a different network (a phone on mobile data), ask one question. It must succeed (200).
+2. From your laptop, ask four questions within a minute over IPv4 (`curl -4 -s -o /dev/null -w "%{http_code}\n" -X POST https://demo.example.com/api/query -H 'content-type: application/json' -d '{"question":"What is the refund policy?"}'`). The fourth must return `429`.
+3. From a different network (a phone on mobile data, or a VPN), ask one question. It must succeed (200).
 
-If the phone also gets `429`, the API sees one address for everyone: every visitor shares one limit. Restore the setting afterwards.
+If the other network also gets `429`, the API sees one address for everyone: every visitor shares one limit.
+
+4. **Undo the test:** set `RATE_LIMIT_COSTLY_PER_MIN` back (5 in the template) and run `docker compose up -d` again. Until you do, the live demo allows only 3 questions per minute per visitor.
 
 ## Known limits
 
@@ -124,4 +134,4 @@ If the phone also gets `429`, the API sees one address for everyone: every visit
 
 Tested with the same files on a laptop (Caddy using its local certificate for `localhost`): the overlay refusing to start without `SITE_ADDRESS` or `POSTGRES_PASSWORD`; nothing published except Caddy; the site and the API through Caddy; the streamed answer arriving as `text/event-stream` without compression; demo-mode writes refused; the rate limit ignoring a forged `X-Forwarded-For`; the non-default password; data surviving a restart; and the backup, restore and password-change commands above.
 
-Not tested here, because it needs a real domain and server: certificate issuance from Let's Encrypt, DNS, the redirect from port 80, and client addresses on a real network (use the check above).
+Not tested here, because it needs a real domain and server: certificate issuance from Let's Encrypt, DNS, the redirect from port 80, client addresses on a real network (use the check above), IPv6 (which is why the guide tells you not to publish an `AAAA` record), and the `docker compose pull caddy db` update step (the Docker daemon on the test machine could not pull images at that time).
