@@ -39,6 +39,12 @@ describe('toInstant', () => {
     expect(toInstant('createdAfter', '2026-01-10T12:00:00Z')).toBe('2026-01-10T12:00:00.000Z');
   });
 
+  it('answers 400 for a year Postgres cannot store, instead of failing later', () => {
+    expect(() => toInstant('createdAfter', '0000-01-01')).toThrow(BadRequestException);
+    expect(() => toInstant('createdBefore', '0000-12-31T23:59:59Z')).toThrow(/year/);
+    expect(toInstant('createdAfter', '0001-01-01')).toBe('0001-01-01T00:00:00.000Z');
+  });
+
   it('answers 400 naming the field when the value is not a date', () => {
     expect(() => toInstant('createdBefore', 'yesterday')).toThrow(BadRequestException);
     expect(() => toInstant('createdBefore', 'yesterday')).toThrow(/createdBefore/);

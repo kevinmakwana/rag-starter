@@ -24,6 +24,17 @@ describe('normalizeTags', () => {
     ]);
   });
 
+  it('keeps combining marks, so words in Indic scripts and decomposed accents are valid tags', () => {
+    expect(normalizeTags(['हिन्दी'])).toEqual(['हिन्दी']);
+    expect(normalizeTags(['தமிழ்'])).toEqual(['தமிழ்']);
+    expect(normalizeTags(['İstanbul'])).toHaveLength(1); // lower-casing İ gives i plus a combining dot
+  });
+
+  it('composes accents, so one tag has one spelling whichever way it was typed', () => {
+    expect(normalizeTags(['cafe\u0301'])).toEqual(['caf\u00e9']);
+    expect(normalizeTags(['cafe\u0301', 'caf\u00e9'])).toEqual(['caf\u00e9']);
+  });
+
   it('rejects a tag that is too long, naming the limit, without echoing all of it', () => {
     const long = 'x'.repeat(MAX_TAG_LENGTH + 1);
     expect(() => normalizeTags([long])).toThrow(BadRequestException);
@@ -49,6 +60,7 @@ describe('normalizeTags', () => {
     expect(() => normalizeTags(["it's"])).toThrow(BadRequestException);
     expect(() => normalizeTags(['_leading'])).toThrow(BadRequestException);
     expect(() => normalizeTags(['#leading'])).toThrow(BadRequestException); // a tag starts with a letter or number
+    expect(() => normalizeTags(['\u0301leading'])).toThrow(BadRequestException); // ... not a combining mark
     expect(() => normalizeTags([1 as unknown as string])).toThrow(/text/);
     expect(() => normalizeTags({ a: 1 })).toThrow(/text/);
   });

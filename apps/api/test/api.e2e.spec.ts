@@ -1707,6 +1707,40 @@ describeIfDb('document tags (e2e)', () => {
     expect(b.tags).toEqual(['billing', 'faq']);
   });
 
+  it('accepts tags with combining marks on create and update, stored in one composed form', async () => {
+    const doc = await made('tags-marks', { tags: ['हिन्दी', 'cafe\u0301'] });
+    expect(doc.tags).toEqual(['caf\u00e9', 'हिन्दी'].sort());
+    const updated = await readJson(await json('PUT', `/documents/${doc.id}`, { tags: ['İstanbul'] }));
+    expect(updated.tags).toHaveLength(1);
+    expect((await readJson(await fetch(`${base}/documents?tag=cafe%CC%81`))).map((d: any) => d.id)).not.toContain(doc.id); // replaced above
+  });
+
+  it('does not let a slow re-index put back tags that were changed while it was embedding', async () => {
+    const doc = await made('tags-race', { tags: ['old'] });
+    const provider = app.get<EmbeddingProvider>(EMBEDDING_PROVIDER);
+    const original = provider.embed.bind(provider);
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const inside = new Promise<void>((resolve) => (entered = resolve));
+    provider.embed = async (texts: string[]) => {
+      entered();
+      await gate;
+      return original(texts);
+    };
+    try {
+      const rebuilding = app.get(DocumentsService).reindex(doc.id); // its snapshot is taken; it is now embedding
+      await inside;
+      const changed = await readJson(await json('PUT', `/documents/${doc.id}`, { tags: ['new'] }));
+      expect(changed.tags).toEqual(['new']);
+      release();
+      await rebuilding;
+    } finally {
+      provider.embed = original;
+    }
+    expect((await readJson(await fetch(`${base}/documents/${doc.id}`))).tags).toEqual(['new']);
+  });
+
   it('replaces, clears and ignores null tags on update', async () => {
     const doc = await made('tags-update', { tags: ['one', 'two'] });
     expect((await readJson(await json('PUT', `/documents/${doc.id}`, { tags: ['Three'] }))).tags).toEqual(['three']);
@@ -1926,6 +1960,8 @@ function filterSuite(title: string, env: Record<string, string>) {
       for (const body of [
         { question: 'q', createdAfter: 'yesterday' },
         { question: 'q', createdBefore: 'not a date' },
+        { question: 'q', createdAfter: '0000-01-01' },
+        { question: 'q', createdBefore: '0000-06-01' },
         { question: 'q', tags: ['<script>'] },
         { question: 'q', tags: [1] },
         { question: 'q', tags: Array.from({ length: 21 }, (_, i) => `t${i}`) },

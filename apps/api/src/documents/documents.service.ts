@@ -254,7 +254,7 @@ export class DocumentsService implements OnApplicationBootstrap {
     title: string,
     content: string,
     language = current.language,
-    tags = current.tags ?? [],
+    tags?: string[],
   ): Promise<DocumentSummary> {
     const chunks = this.chunk(content);
     const hash = hashContent(content);
@@ -271,10 +271,11 @@ export class DocumentsService implements OnApplicationBootstrap {
       updated = await this.db.transaction(async (client) => {
         const { rows } = await client.query<DocumentRow>(
           `UPDATE documents
-              SET title = $2, char_count = $3, chunk_count = $4, content_hash = $5, embedding_model = $6, content = $7, language = $9, tags = $10
+              SET title = $2, char_count = $3, chunk_count = $4, content_hash = $5, embedding_model = $6, content = $7, language = $9,
+                  tags = COALESCE($10::text[], tags)
             WHERE id = $1 AND owner_id = $8
           RETURNING ${SUMMARY_COLUMNS}`,
-          [current.id, title, content.length, chunks.length, hash, this.embeddingId, content, current.owner_id ?? DEFAULT_OWNER, language, tags],
+          [current.id, title, content.length, chunks.length, hash, this.embeddingId, content, current.owner_id ?? DEFAULT_OWNER, language, tags ?? null],
         );
         if (!rows[0]) return undefined; // deleted while we were embedding
         await client.query('DELETE FROM chunks WHERE document_id = $1', [current.id]);

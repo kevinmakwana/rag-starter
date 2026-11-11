@@ -40,5 +40,8 @@ export function documentFilterSql(
 export function toInstant(name: string, value: string): string {
   const ms = Date.parse(value);
   if (Number.isNaN(ms)) throw new BadRequestException(`${name} must be an ISO 8601 date or date-time`);
-  return new Date(ms).toISOString();
+  const instant = new Date(ms);
+  // Postgres has no year 0 (or earlier, as JavaScript counts it) and would fail the query with a 500.
+  if (instant.getUTCFullYear() < 1) throw new BadRequestException(`${name} must be in the year 1 or later`);
+  return instant.toISOString();
 }
