@@ -52,14 +52,18 @@ describe('QueryService.retrieve in hybrid mode', () => {
     score,
   });
 
-  /** A db that answers the vector query and the full-text query from canned lists. */
+  /** The language lookup that comes before the full-text query: one document language, english. */
+  const isLanguageLookup = (sql: string) => /SELECT DISTINCT language/.test(sql);
+
+  /** A db that answers the vector query and the full-text query from canned lists (best first, as ranked). */
   function fakeDb(vector: ReturnType<typeof row>[], lexical: ReturnType<typeof row>[]) {
     const queries: string[] = [];
     return {
       queries,
       query: async (sql: string) => {
+        if (isLanguageLookup(sql)) return { rows: [{ language: 'english' }] };
         queries.push(/ts_rank|@@/.test(sql) ? 'lexical' : 'vector');
-        return { rows: /ts_rank|@@/.test(sql) ? lexical : vector };
+        return { rows: /ts_rank|@@/.test(sql) ? lexical.map((r, i) => ({ ...r, rank: lexical.length - i })) : vector };
       },
     } as any;
   }
@@ -84,7 +88,7 @@ describe('QueryService.retrieve in hybrid mode', () => {
     const db = {
       query: async (sql: string) => {
         sqls.push(sql);
-        return { rows: [] };
+        return { rows: isLanguageLookup(sql) ? [{ language: 'english' }] : [] };
       },
     } as any;
 
@@ -92,7 +96,7 @@ describe('QueryService.retrieve in hybrid mode', () => {
 
     const lexical = sqls.find((sql) => /ts_rank_cd/.test(sql))!;
     // Postgres returns tied rows in physical order, which shifts as rows are rewritten.
-    expect(lexical).toMatch(/ORDER BY ts_rank_cd\([^)]*\)[^)]*\) DESC,\s*c\.id/);
+    expect(lexical).toMatch(/ORDER BY rank DESC,\s*c\.id/);
   });
 
   it('surfaces a passage that only full-text search ranked well', async () => {
@@ -101,6 +105,28 @@ describe('QueryService.retrieve in hybrid mode', () => {
 
     expect(new Set(db.queries)).toEqual(new Set(['lexical', 'vector']));
     expect(chunks.map((c) => c.chunkId)).toEqual(['b', 'a', 'c']); // b is in both lists, so it leads
+  });
+
+  it('runs one full-text query per document language, with that language as the configuration, and merges them by rank', async () => {
+    const seen: { sql: string; params: unknown[] }[] = [];
+    const ranked = (id: string, rank: number) => ({ ...row(id, 0.5), rank });
+    const db = {
+      query: async (sql: string, params: unknown[]) => {
+        seen.push({ sql, params });
+        if (isLanguageLookup(sql)) return { rows: [{ language: 'english' }, { language: 'german' }] };
+        if (/ts_rank|@@/.test(sql)) {
+          return { rows: params[4] === 'german' ? [ranked('de1', 0.9), ranked('de2', 0.1)] : [ranked('en1', 0.5)] };
+        }
+        return { rows: [] };
+      },
+    } as any;
+
+    const lexical = await (service('hybrid', db) as any).lexicalSearch('[0]', 'Rechnung invoice', 10, 'default');
+
+    const fts = seen.filter((c) => /@@/.test(c.sql));
+    expect(fts.map((c) => c.params[4]).sort()).toEqual(['english', 'german']);
+    expect(lexical.map((r: { chunkId: string }) => r.chunkId)).toEqual(['de1', 'en1', 'de2']); // interleaved by rank
+    expect(lexical[0]).not.toHaveProperty('rank');
   });
 
   it('still drops passages below the similarity threshold, so unanswerable questions find nothing', async () => {
