@@ -1551,9 +1551,9 @@ describeIfDb('multilingual keyword search (e2e)', () => {
   });
 
   /** The keyword half only: the mock embeddings are bag-of-words, so a vector match could hide a keyword miss. */
-  const lexical = async (question: string, owner = 'default', documentIds?: string[]) => {
+  const lexical = async (question: string, owner = 'default', filter?: DocumentFilter) => {
     const [embedding] = await app.get<EmbeddingProvider>(EMBEDDING_PROVIDER).embed([question]);
-    const rows = await (app.get(QueryService) as any).lexicalSearch(toVector(embedding), question, 20, owner, documentIds);
+    const rows = await (app.get(QueryService) as any).lexicalSearch(toVector(embedding), question, 20, owner, filter);
     return (rows as { title: string }[]).map((r) => r.title);
   };
 
@@ -1584,7 +1584,7 @@ describeIfDb('multilingual keyword search (e2e)', () => {
   it('keeps the search inside the given documents', async () => {
     const de = await add('DE', DE, 'german');
     await add('EN', 'The invoices are paid yearly.', 'english');
-    expect(await lexical('Rechnung invoice', 'default', [de.id])).toEqual(['DE']);
+    expect(await lexical('Rechnung invoice', 'default', { documentIds: [de.id] })).toEqual(['DE']);
   });
 
   it("does not look at another user's documents or languages", async () => {
