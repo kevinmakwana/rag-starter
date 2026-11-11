@@ -221,6 +221,7 @@ export class JobsService implements OnApplicationBootstrap, OnModuleDestroy {
           job.file ?? Buffer.alloc(0),
           job.owner_id,
           job.payload?.language as string | undefined,
+          job.payload?.tags,
         );
       case 'reindex_all':
         return this.documents.reindexAll(job.owner_id, (done, total) =>

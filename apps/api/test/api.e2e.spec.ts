@@ -21,6 +21,7 @@ import { evaluate, evaluateAnswers } from '../src/eval/evaluate';
 import { Judge } from '../src/eval/judge';
 import { JobsService } from '../src/jobs/jobs.service';
 import { EMBEDDING_PROVIDER, EmbeddingProvider } from '../src/providers/types';
+import { DocumentFilter } from '../src/query/document-filter';
 import { QueryService } from '../src/query/query.service';
 import { bullet, makeDocx, makePdf, para } from './helpers/office';
 
@@ -938,6 +939,12 @@ describeIfDb('demo mode on the real routes (e2e)', () => {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
 
+  it('lets a visitor read the tag list, while editing a document (even only its tags) stays refused', async () => {
+    expect((await send('GET', '/documents/tags')).status).toBe(200);
+    const [doc] = await app.get(DocumentsService).list();
+    expect((await send('PUT', `/documents/${doc.id}`, { tags: [] })).status).toBe(403);
+  });
+
   it('has indexed the sample documents by the time it answers, with no seed step', async () => {
     const samples = resolve(process.cwd(), '../../samples');
     const expected: string[] = [];
@@ -1223,7 +1230,10 @@ describeIfDb('schema migrations on real schemas (e2e)', () => {
     expect((await scratch.pool.query('SELECT id, name FROM schema_migrations ORDER BY id')).rows).toEqual([
       { id: 1, name: 'baseline' },
       { id: 2, name: 'document_language' },
+      { id: 3, name: 'document_tags' },
     ]);
+    expect(await columns('documents')).toEqual(expect.arrayContaining(['language', 'tags']));
+    expect(idx).toContain('documents_tags_idx');
     expect(await columns('documents')).toContain('language');
     expect(await columns('chunks')).toContain('language');
   });
@@ -1261,11 +1271,11 @@ describeIfDb('schema migrations on real schemas (e2e)', () => {
 
     await runMigrations(scratch.pool, migrations, ctx);
 
-    const kept = await q('SELECT title, owner_id, content_hash, content, language FROM documents');
-    expect(kept.rows).toEqual([{ title: 'Old', owner_id: 'default', content_hash: null, content: null, language: 'english' }]);
+    const kept = await q('SELECT title, owner_id, content_hash, content, language, tags FROM documents');
+    expect(kept.rows).toEqual([{ title: 'Old', owner_id: 'default', content_hash: null, content: null, language: 'english', tags: [] }]);
     const chunk = await q("SELECT count(*)::int AS n FROM chunks WHERE fts @@ plainto_tsquery('english', 'words')");
     expect(chunk.rows[0].n).toBe(1);
-    expect((await q('SELECT id FROM schema_migrations ORDER BY id')).rows).toEqual([{ id: 1 }, { id: 2 }]);
+    expect((await q('SELECT id FROM schema_migrations ORDER BY id')).rows).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }]);
   });
 
   it('migration 2 gives existing rows the english language and keeps them searchable, then supports other languages', async () => {
@@ -1274,7 +1284,7 @@ describeIfDb('schema migrations on real schemas (e2e)', () => {
     const doc = await q("INSERT INTO documents (title, char_count, chunk_count) VALUES ('Old', 12, 1) RETURNING id");
     await q("INSERT INTO chunks (document_id, ordinal, heading, content, embedding) VALUES ($1, 0, 'H', 'The invoices are paid yearly', '[1,0,0,0,0,0,0,0]')", [doc.rows[0].id]);
 
-    expect((await runMigrations(scratch.pool, migrations, ctx)).map((m) => m.id)).toEqual([2]);
+    expect((await runMigrations(scratch.pool, migrations.slice(0, 2), ctx)).map((m) => m.id)).toEqual([2]);
 
     expect((await q('SELECT language FROM documents')).rows).toEqual([{ language: 'english' }]);
     expect((await q('SELECT language::text AS language FROM chunks')).rows).toEqual([{ language: 'english' }]);
@@ -1293,15 +1303,28 @@ describeIfDb('schema migrations on real schemas (e2e)', () => {
     expect(hits.rows).toEqual([{ language: 'german' }]);
   });
 
+  it('migration 3 gives existing documents no tags and indexes the column', async () => {
+    await runMigrations(scratch.pool, migrations.slice(0, 2), ctx);
+    const q = (sql: string, p: unknown[] = []) => scratch.pool.query(sql, p);
+    await q("INSERT INTO documents (title, char_count) VALUES ('Old', 3)");
+
+    expect((await runMigrations(scratch.pool, migrations, ctx)).map((m) => m.id)).toEqual([3]);
+
+    expect((await q('SELECT tags FROM documents')).rows).toEqual([{ tags: [] }]);
+    expect(await indexes()).toContain('documents_tags_idx');
+    await q("UPDATE documents SET tags = '{a,b}'");
+    expect((await q("SELECT count(*)::int AS n FROM documents WHERE tags && ARRAY['b']")).rows[0].n).toBe(1);
+  });
+
   it('adopts a database that already has the current schema but no tracking table', async () => {
     await runMigrations(scratch.pool, migrations.slice(0, 1), ctx); // the schema as it was before migration 2
     await scratch.pool.query("INSERT INTO documents (title, char_count, content_hash) VALUES ('Kept', 5, 'h1')");
     await scratch.pool.query('DROP TABLE schema_migrations'); // what a database from before versioned migrations looks like
 
-    await expect(runMigrations(scratch.pool, migrations, ctx)).resolves.toHaveLength(2);
+    await expect(runMigrations(scratch.pool, migrations, ctx)).resolves.toHaveLength(3);
 
     expect((await scratch.pool.query('SELECT title FROM documents')).rows).toEqual([{ title: 'Kept' }]);
-    expect((await scratch.pool.query('SELECT id FROM schema_migrations ORDER BY id')).rows).toEqual([{ id: 1 }, { id: 2 }]);
+    expect((await scratch.pool.query('SELECT id FROM schema_migrations ORDER BY id')).rows).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }]);
   });
 });
 
@@ -1325,7 +1348,7 @@ describeIfDb('DatabaseService startup (e2e)', () => {
     await first.onModuleDestroy();
     const second = service(8);
     await second.onModuleInit();
-    expect((await second.query('SELECT id FROM schema_migrations ORDER BY id')).rows).toEqual([{ id: 1 }, { id: 2 }]);
+    expect((await second.query('SELECT id FROM schema_migrations ORDER BY id')).rows).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }]);
     await second.onModuleDestroy();
   });
 
@@ -1528,9 +1551,9 @@ describeIfDb('multilingual keyword search (e2e)', () => {
   });
 
   /** The keyword half only: the mock embeddings are bag-of-words, so a vector match could hide a keyword miss. */
-  const lexical = async (question: string, owner = 'default', documentIds?: string[]) => {
+  const lexical = async (question: string, owner = 'default', filter?: DocumentFilter) => {
     const [embedding] = await app.get<EmbeddingProvider>(EMBEDDING_PROVIDER).embed([question]);
-    const rows = await (app.get(QueryService) as any).lexicalSearch(toVector(embedding), question, 20, owner, documentIds);
+    const rows = await (app.get(QueryService) as any).lexicalSearch(toVector(embedding), question, 20, owner, filter);
     return (rows as { title: string }[]).map((r) => r.title);
   };
 
@@ -1561,7 +1584,7 @@ describeIfDb('multilingual keyword search (e2e)', () => {
   it('keeps the search inside the given documents', async () => {
     const de = await add('DE', DE, 'german');
     await add('EN', 'The invoices are paid yearly.', 'english');
-    expect(await lexical('Rechnung invoice', 'default', [de.id])).toEqual(['DE']);
+    expect(await lexical('Rechnung invoice', 'default', { documentIds: [de.id] })).toEqual(['DE']);
   });
 
   it("does not look at another user's documents or languages", async () => {
@@ -1591,3 +1614,381 @@ describeIfDb('multilingual keyword search (e2e)', () => {
     expect(await lexical('zzzzqqqq')).toEqual([]);
   });
 });
+
+describeIfDb('document tags (e2e)', () => {
+  let app: INestApplication;
+  let base: string;
+
+  beforeAll(async () => {
+    Object.assign(process.env, {
+      DATABASE_URL: DB,
+      EMBEDDING_PROVIDER: 'mock',
+      CHAT_PROVIDER: 'mock',
+      EMBEDDING_DIM: '256',
+      API_KEYS: '',
+      DEMO_MODE: '',
+      FTS_LANGUAGE: '',
+      RATE_LIMIT_PER_MIN: '0',
+      RATE_LIMIT_COSTLY_PER_MIN: '0',
+    });
+    const { AppModule } = await import('../src/app.module');
+    const { configureApp } = await import('../src/app.setup');
+    const { APP_CONFIG } = await import('../src/config');
+    const nest = await NestFactory.create<NestExpressApplication>(AppModule, { logger: false });
+    configureApp(nest, nest.get(APP_CONFIG));
+    await nest.listen(0);
+    app = nest;
+    base = `http://127.0.0.1:${(nest.getHttpServer().address() as AddressInfo).port}`;
+  });
+  afterAll(async () => {
+    await app?.close();
+  });
+
+  const json = (method: string, path: string, body: unknown) =>
+    fetch(`${base}${path}`, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const upload = (path: string, fields: [string, string][], text: string, name: string) => {
+    const form = new FormData();
+    form.append('file', new Blob([text]), name);
+    for (const [k, v] of fields) form.append(k, v);
+    return fetch(`${base}${path}`, { method: 'POST', body: form });
+  };
+  const remove = (id: string) => fetch(`${base}/documents/${id}`, { method: 'DELETE' });
+  const create = async (title: string, extra: Record<string, unknown> = {}) =>
+    readJson(await json('POST', '/documents', { title, content: `${title} body text. Marker ${title}.`, ...extra }));
+  const chunkIds = async (id: string) =>
+    (await app.get(DatabaseService).query('SELECT id::text FROM chunks WHERE document_id = $1 ORDER BY id', [id])).rows.map((r: any) => r.id);
+  const waitForJob = async (id: string) => {
+    for (let i = 0; i < 100; i++) {
+      const j = await readJson(await fetch(`${base}/jobs/${id}`));
+      if (j.status === 'succeeded' || j.status === 'failed') return j;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error('job did not finish');
+  };
+  const ids: string[] = [];
+  afterEach(async () => {
+    await Promise.all(ids.splice(0).map(remove));
+  });
+  const made = async (title: string, extra: Record<string, unknown> = {}) => {
+    const doc = await create(title, extra);
+    ids.push(doc.id);
+    return doc;
+  };
+
+  it('defaults to no tags, and reports them on create, get and list', async () => {
+    const plain = await made('tags-plain');
+    expect(plain.tags).toEqual([]);
+    const tagged = await made('tags-tagged', { tags: ['  Billing ', 'PRICING', 'billing'] });
+    expect(tagged.tags).toEqual(['billing', 'pricing']);
+    expect((await readJson(await fetch(`${base}/documents/${tagged.id}`))).tags).toEqual(['billing', 'pricing']);
+    expect((await readJson(await fetch(`${base}/documents`))).find((d: any) => d.id === tagged.id).tags).toEqual(['billing', 'pricing']);
+  });
+
+  it('answers 400, never 500, for bad tags on paste, upload, update and both job routes', async () => {
+    const ok = await made('tags-ok');
+    const tooMany = Array.from({ length: 21 }, (_, i) => `t${i}`);
+    const bad = [['<script>'], ['x'.repeat(41)], tooMany, [1], 'not-an-array'] as unknown[];
+    for (const tags of bad) {
+      expect((await json('POST', '/documents', { title: 'x', content: 'text', tags })).status).toBe(400);
+      expect((await json('PUT', `/documents/${ok.id}`, { tags })).status).toBe(400);
+      expect((await json('POST', '/jobs/documents', { title: 'x', content: 'text', tags })).status).toBe(400);
+    }
+    for (const value of ['<script>', 'x'.repeat(41), tooMany.join(',')]) {
+      expect((await upload('/documents/upload', [['tags', value]], 'text to index', 'x.txt')).status).toBe(400);
+      expect((await upload('/jobs/upload', [['tags', value]], 'text to index', 'x.txt')).status).toBe(400);
+    }
+  });
+
+  it('takes tags from a multipart upload as a comma-separated or a repeated field', async () => {
+    const a = await readJson(await upload('/documents/upload', [['tags', 'Billing, pricing']], 'Alpha words here. Tags-marker-one.', 'a.txt'));
+    const b = await readJson(await upload('/documents/upload', [['tags', 'faq'], ['tags', 'billing']], 'Beta words here. Tags-marker-two.', 'b.txt'));
+    ids.push(a.id, b.id);
+    expect(a.tags).toEqual(['billing', 'pricing']);
+    expect(b.tags).toEqual(['billing', 'faq']);
+  });
+
+  it('accepts tags with combining marks on create and update, stored in one composed form', async () => {
+    const doc = await made('tags-marks', { tags: ['हिन्दी', 'cafe\u0301'] });
+    expect(doc.tags).toEqual(['caf\u00e9', 'हिन्दी'].sort());
+    const updated = await readJson(await json('PUT', `/documents/${doc.id}`, { tags: ['İstanbul'] }));
+    expect(updated.tags).toHaveLength(1);
+    expect((await readJson(await fetch(`${base}/documents?tag=cafe%CC%81`))).map((d: any) => d.id)).not.toContain(doc.id); // replaced above
+  });
+
+  it('does not let a slow re-index put back tags that were changed while it was embedding', async () => {
+    const doc = await made('tags-race', { tags: ['old'] });
+    const provider = app.get<EmbeddingProvider>(EMBEDDING_PROVIDER);
+    const original = provider.embed.bind(provider);
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const inside = new Promise<void>((resolve) => (entered = resolve));
+    provider.embed = async (texts: string[]) => {
+      entered();
+      await gate;
+      return original(texts);
+    };
+    try {
+      const rebuilding = app.get(DocumentsService).reindex(doc.id); // its snapshot is taken; it is now embedding
+      await inside;
+      const changed = await readJson(await json('PUT', `/documents/${doc.id}`, { tags: ['new'] }));
+      expect(changed.tags).toEqual(['new']);
+      release();
+      await rebuilding;
+    } finally {
+      provider.embed = original;
+    }
+    expect((await readJson(await fetch(`${base}/documents/${doc.id}`))).tags).toEqual(['new']);
+  });
+
+  it('replaces, clears and ignores null tags on update', async () => {
+    const doc = await made('tags-update', { tags: ['one', 'two'] });
+    expect((await readJson(await json('PUT', `/documents/${doc.id}`, { tags: ['Three'] }))).tags).toEqual(['three']);
+    expect((await readJson(await json('PUT', `/documents/${doc.id}`, { tags: [] }))).tags).toEqual([]);
+    await json('PUT', `/documents/${doc.id}`, { tags: ['keep'] });
+    const res = await json('PUT', `/documents/${doc.id}`, { tags: null });
+    expect(res.status).toBe(400); // null is "not sent", and nothing else was sent
+    expect((await readJson(await fetch(`${base}/documents/${doc.id}`))).tags).toEqual(['keep']);
+  });
+
+  it('changes only the tags without re-embedding: same chunks, same text, works without stored text', async () => {
+    const doc = await made('tags-meta', { tags: ['a'] });
+    const before = await chunkIds(doc.id);
+    const updated = await readJson(await json('PUT', `/documents/${doc.id}`, { tags: ['b'] }));
+    expect(updated.tags).toEqual(['b']);
+    expect(await chunkIds(doc.id)).toEqual(before);
+
+    await app.get(DatabaseService).query('UPDATE documents SET content = NULL WHERE id = $1', [doc.id]); // a legacy document
+    const legacy = await json('PUT', `/documents/${doc.id}`, { tags: ['c'] });
+    expect(legacy.status).toBe(200);
+    expect((await readJson(legacy)).tags).toEqual(['c']);
+  });
+
+  it('writes tags together with a re-index when the title changes too', async () => {
+    const doc = await made('tags-with-title', { tags: ['a'] });
+    const before = await chunkIds(doc.id);
+    const updated = await readJson(await json('PUT', `/documents/${doc.id}`, { title: 'tags-with-title renamed', tags: ['z'] }));
+    expect(updated).toMatchObject({ title: 'tags-with-title renamed', tags: ['z'] });
+    expect(await chunkIds(doc.id)).not.toEqual(before);
+    const reindexed = await readJson(await fetch(`${base}/documents/${doc.id}/reindex`, { method: 'POST' }));
+    expect(reindexed.tags).toEqual(['z']);
+  });
+
+  it('returns the existing document, with its own tags, when the same text is sent again with other tags', async () => {
+    const first = await made('tags-dup', { tags: ['first'] });
+    const second = await json('POST', '/documents', { title: 'tags-dup', content: 'tags-dup body text. Marker tags-dup.', tags: ['second'] });
+    expect(second.status).toBe(200);
+    expect(await readJson(second)).toMatchObject({ id: first.id, duplicate: true, tags: ['first'] });
+  });
+
+  it('passes tags through both background routes', async () => {
+    const text = await readJson(await json('POST', '/jobs/documents', { title: 'tags-job-text', content: 'Job text body. Tags-marker-job.', tags: ['Job', 'text'] }));
+    expect((await waitForJob(text.id)).status).toBe('succeeded');
+    const created = (await readJson(await fetch(`${base}/documents`))).find((d: any) => d.title === 'tags-job-text');
+    ids.push(created.id);
+    expect(created.tags).toEqual(['job', 'text']);
+
+    const file = await readJson(await upload('/jobs/upload', [['tags', 'Job, file']], 'Job file body. Tags-marker-file.', 'tags-job.txt'));
+    expect((await waitForJob(file.id)).status).toBe('succeeded');
+    const createdFile = (await readJson(await fetch(`${base}/documents`))).find((d: any) => d.source === 'tags-job.txt');
+    ids.push(createdFile.id);
+    expect(createdFile.tags).toEqual(['file', 'job']);
+  });
+
+  it('filters the list by tag (any of) and by source, and lists the tags with counts', async () => {
+    const a = await made('tags-list-a', { tags: ['billing'], source: 'list-a.md' });
+    const b = await made('tags-list-b', { tags: ['pricing'], source: 'list-b.md' });
+    const c = await made('tags-list-c', { source: 'list-b.md' });
+    const list = async (qs: string) =>
+      (await readJson(await fetch(`${base}/documents${qs}`))).map((d: any) => d.id).filter((id: string) => [a.id, b.id, c.id].includes(id));
+
+    expect((await list('?tag=billing')).sort()).toEqual([a.id]);
+    expect((await list('?tag=billing&tag=pricing')).sort()).toEqual([a.id, b.id].sort());
+    expect((await list('?tag=Billing,pricing')).sort()).toEqual([a.id, b.id].sort());
+    expect((await list('?source=list-b.md')).sort()).toEqual([b.id, c.id].sort());
+    expect(await list('?tag=pricing&source=list-a.md')).toEqual([]);
+    expect((await fetch(`${base}/documents?tag=%3Cscript%3E`)).status).toBe(400);
+
+    const tags = await readJson(await fetch(`${base}/documents/tags`));
+    expect(tags).toEqual(expect.arrayContaining([{ tag: 'billing', count: expect.any(Number) }, { tag: 'pricing', count: expect.any(Number) }]));
+  });
+
+  it("does not list or count another user's tags or documents", async () => {
+    const docs = app.get(DocumentsService);
+    const bob = await docs.create({ title: 'tags-bob', content: 'Bob only text. Tags-marker-bob.', tags: ['bobs-secret'] }, 'bob');
+    try {
+      expect((await docs.listTags('alice')).map((t) => t.tag)).not.toContain('bobs-secret');
+      expect((await docs.listTags('bob')).map((t) => t.tag)).toContain('bobs-secret');
+      expect((await docs.list('alice', { tags: ['bobs-secret'] })).map((d) => d.id)).toEqual([]);
+      expect((await docs.list('bob', { tags: ['bobs-secret'] })).map((d) => d.id)).toEqual([bob.id]);
+    } finally {
+      await docs.remove(bob.id, 'bob');
+    }
+  });
+});
+
+function filterSuite(title: string, env: Record<string, string>) {
+  describeIfDb(title, () => {
+    let app: INestApplication;
+    let base: string;
+
+    beforeAll(async () => {
+      Object.assign(process.env, {
+        DATABASE_URL: DB,
+        EMBEDDING_PROVIDER: 'mock',
+        CHAT_PROVIDER: 'mock',
+        EMBEDDING_DIM: '256',
+        API_KEYS: '',
+        DEMO_MODE: '',
+        FTS_LANGUAGE: '',
+        RATE_LIMIT_PER_MIN: '0',
+        RATE_LIMIT_COSTLY_PER_MIN: '0',
+        EXACT_SEARCH_MAX_CHUNKS: '',
+        ...env,
+      });
+      const { AppModule } = await import('../src/app.module');
+      const { configureApp } = await import('../src/app.setup');
+      const { APP_CONFIG } = await import('../src/config');
+      const nest = await NestFactory.create<NestExpressApplication>(AppModule, { logger: false });
+      configureApp(nest, nest.get(APP_CONFIG));
+      await nest.listen(0);
+      app = nest;
+      base = `http://127.0.0.1:${(nest.getHttpServer().address() as AddressInfo).port}`;
+    });
+    afterAll(async () => {
+      process.env.EXACT_SEARCH_MAX_CHUNKS = '';
+      await app?.close();
+    });
+
+    const db = () => app.get(DatabaseService);
+    const docs = () => app.get(DocumentsService);
+    const created: string[] = [];
+    afterEach(async () => {
+      await Promise.all(created.splice(0).map((id) => db().query('DELETE FROM documents WHERE id = $1', [id])));
+    });
+    /** Every document mentions "invoice" so an unfiltered question finds all of them. */
+    const add = async (title: string, opts: { tags?: string[]; source?: string; date?: string; owner?: string } = {}) => {
+      const doc = await docs().create(
+        { title, content: `The invoice policy for ${title}. Filters-marker ${title}.`, tags: opts.tags, source: opts.source },
+        opts.owner ?? 'default',
+      );
+      created.push(doc.id);
+      if (opts.date) await db().query('UPDATE documents SET created_at = $2 WHERE id = $1', [doc.id, opts.date]);
+      return doc;
+    };
+    const titles = async (filter: DocumentFilter | undefined, owner = 'default') =>
+      (await app.get(QueryService).retrieve('invoice policy', 10, filter, owner)).map((c) => c.title).sort();
+    const vec = async (q: string) => toVector((await app.get<EmbeddingProvider>(EMBEDDING_PROVIDER).embed([q]))[0]);
+
+    it('retrieves only documents with any of the given tags', async () => {
+      await add('F-billing', { tags: ['billing'] });
+      await add('F-pricing', { tags: ['pricing', 'extra'] });
+      await add('F-untagged');
+      expect(await titles(undefined)).toEqual(['F-billing', 'F-pricing', 'F-untagged']);
+      expect(await titles({ tags: ['billing'] })).toEqual(['F-billing']);
+      expect(await titles({ tags: ['billing', 'extra'] })).toEqual(['F-billing', 'F-pricing']);
+      expect(await titles({ tags: ['nothing'] })).toEqual([]);
+    });
+
+    it('filters by source, exactly', async () => {
+      await add('F-a', { source: 'f-a.md' });
+      await add('F-b', { source: 'f-b.md' });
+      expect(await titles({ source: 'f-a.md' })).toEqual(['F-a']);
+      expect(await titles({ source: 'f-a' })).toEqual([]);
+    });
+
+    it('filters by date: after is inclusive, before is exclusive', async () => {
+      await add('F-jan', { date: '2026-01-10T00:00:00Z' });
+      await add('F-feb', { date: '2026-02-10T00:00:00Z' });
+      await add('F-mar', { date: '2026-03-10T00:00:00Z' });
+      expect(await titles({ createdAfter: '2026-02-10T00:00:00.000Z' })).toEqual(['F-feb', 'F-mar']);
+      expect(await titles({ createdBefore: '2026-02-10T00:00:00.000Z' })).toEqual(['F-jan']);
+      expect(await titles({ createdAfter: '2026-01-15T00:00:00.000Z', createdBefore: '2026-03-01T00:00:00.000Z' })).toEqual(['F-feb']);
+    });
+
+    it('combines every filter with AND, and with documentIds', async () => {
+      const a = await add('F-both', { tags: ['billing'], source: 'f.md', date: '2026-02-10T00:00:00Z' });
+      await add('F-tag-only', { tags: ['billing'], source: 'other.md', date: '2026-02-10T00:00:00Z' });
+      await add('F-late', { tags: ['billing'], source: 'f.md', date: '2026-06-10T00:00:00Z' });
+      const filter = { tags: ['billing'], source: 'f.md', createdBefore: '2026-03-01T00:00:00.000Z' };
+      expect(await titles(filter)).toEqual(['F-both']);
+      expect(await titles({ ...filter, documentIds: [a.id] })).toEqual(['F-both']);
+      expect(await titles({ ...filter, documentIds: ['00000000-0000-0000-0000-000000000000'] })).toEqual([]);
+    });
+
+    it("never returns another user's documents, however the filter is set", async () => {
+      await add('F-bob', { tags: ['shared-tag'], owner: 'bob' });
+      await add('F-alice', { tags: ['shared-tag'], owner: 'alice' });
+      expect(await titles({ tags: ['shared-tag'] }, 'alice')).toEqual(['F-alice']);
+      expect(await titles({ tags: ['shared-tag'] }, 'bob')).toEqual(['F-bob']);
+    });
+
+    it('applies the filter to the vector search and to the keyword search alike', async () => {
+      await add('F-billing', { tags: ['billing'] });
+      await add('F-pricing', { tags: ['pricing'] });
+      const query = app.get(QueryService) as any;
+      const filter = { tags: ['billing'] };
+      const v = await vec('invoice policy');
+      expect((await query.vectorSearch(v, 10, 'default', filter)).map((r: any) => r.title)).toEqual(['F-billing']);
+      expect((await query.lexicalSearch(v, 'invoice policy', 10, 'default', filter)).map((r: any) => r.title)).toEqual(['F-billing']);
+      expect((await query.lexicalSearch(v, 'invoice policy', 10, 'default', { tags: ['none'] })).map((r: any) => r.title)).toEqual([]);
+    });
+
+    const post = (path: string, body: unknown) =>
+      fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+
+    it('filters /query and /query/stream, and answers "no passages" when nothing matches', async () => {
+      await add('F-billing', { tags: ['billing'], date: '2026-02-10T00:00:00Z' });
+      await add('F-pricing', { tags: ['pricing'] });
+      const hit = await readJson(await post('/query', { question: 'invoice policy', tags: ['Billing'] }));
+      expect(hit.sources.map((s: any) => s.title)).toEqual(['F-billing']);
+      const byDate = await readJson(await post('/query', { question: 'invoice policy', createdAfter: '2026-02-10', createdBefore: '2026-02-11' }));
+      expect(byDate.sources.map((s: any) => s.title)).toEqual(['F-billing']);
+
+      const none = await post('/query', { question: 'invoice policy', tags: ['nothing'] });
+      expect(none.status).toBe(200);
+      expect((await readJson(none)).sources).toEqual([]);
+
+      const stream = await post('/query/stream', { question: 'invoice policy', tags: ['nothing'] });
+      expect(stream.status).toBe(200);
+      const events = parseSse(await stream.text());
+      expect(events.find((e) => e.event === 'sources')!.data.sources).toEqual([]);
+      expect(events.at(-1)!.event).toBe('done');
+    });
+
+    it('answers 400 for bad filters on both question routes', async () => {
+      for (const body of [
+        { question: 'q', createdAfter: 'yesterday' },
+        { question: 'q', createdBefore: 'not a date' },
+        { question: 'q', createdAfter: '0000-01-01' },
+        { question: 'q', createdBefore: '0000-06-01' },
+        { question: 'q', tags: ['<script>'] },
+        { question: 'q', tags: [1] },
+        { question: 'q', tags: Array.from({ length: 21 }, (_, i) => `t${i}`) },
+        { question: 'q', source: 5 },
+      ]) {
+        expect((await post('/query', body)).status).toBe(400);
+        expect((await post('/query/stream', body)).status).toBe(400);
+      }
+    });
+
+    it('does not depend on the database time zone', async () => {
+      await add('F-edge', { date: '2026-02-10T00:00:00Z' });
+      const client = await db().pool.connect();
+      try {
+        await client.query("SET TIME ZONE 'Pacific/Auckland'");
+        const { rows } = await client.query(
+          "SELECT title FROM documents d WHERE d.title = 'F-edge' AND d.created_at >= $1::timestamptz AND d.created_at < $2::timestamptz",
+          ['2026-02-10T00:00:00.000Z', '2026-02-10T00:00:01.000Z'],
+        );
+        expect(rows).toHaveLength(1);
+      } finally {
+        await client.query('RESET TIME ZONE');
+        client.release();
+      }
+    });
+  });
+}
+
+filterSuite('metadata filters on the real routes (e2e)', {});
+filterSuite('metadata filters on the approximate index path (e2e)', { EXACT_SEARCH_MAX_CHUNKS: '0' });

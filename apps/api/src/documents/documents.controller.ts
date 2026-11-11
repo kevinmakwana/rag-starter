@@ -10,6 +10,7 @@ import {
   ParseUUIDPipe,
   Post,
   Put,
+  Query,
   Res,
   UploadedFile,
   UseInterceptors,
@@ -27,6 +28,7 @@ import {
   UpdateDocumentDto,
 } from './documents.dto';
 import { DocumentsService, ReindexReport } from './documents.service';
+import { normalizeTags } from './tags';
 
 /** 201 for a new document, 200 when identical content already existed. */
 function respondCreated(res: Response, doc: DocumentSummary): DocumentSummary {
@@ -38,9 +40,21 @@ function respondCreated(res: Response, doc: DocumentSummary): DocumentSummary {
 export class DocumentsController {
   constructor(@Inject(DocumentsService) private readonly documents: DocumentsService) {}
 
+  /** Optionally only documents with any of the `tag`s (repeat it, or separate with commas) and/or this exact `source`. */
   @Get()
-  list(@CurrentUser() owner: string): Promise<DocumentSummary[]> {
-    return this.documents.list(owner);
+  list(
+    @CurrentUser() owner: string,
+    @Query('tag') tag?: unknown,
+    @Query('source') source?: unknown,
+  ): Promise<DocumentSummary[]> {
+    if (source != null && typeof source !== 'string') throw new BadRequestException('source must be a single value');
+    return this.documents.list(owner, { tags: normalizeTags(tag), source: source || undefined });
+  }
+
+  /** Every tag the caller has used, with how many documents carry it. (Declared before `:id` so it is not read as an id.) */
+  @Get('tags')
+  listTags(@CurrentUser() owner: string): Promise<{ tag: string; count: number }[]> {
+    return this.documents.listTags(owner);
   }
 
   /** Index pasted text. Responds 200 instead of 201 when the content was already indexed. */
@@ -62,11 +76,15 @@ export class DocumentsController {
     @CurrentUser() owner: string,
     @Res({ passthrough: true }) res: Response,
     @Body('language') language: unknown,
+    @Body('tags') tags: unknown,
     @UploadedFile() file?: Express.Multer.File,
   ): Promise<DocumentSummary> {
     if (!file) throw new BadRequestException('Attach a file in the "file" field');
     try {
-      return respondCreated(res, await this.documents.ingestFile(file.originalname, file.buffer, owner, language as string | undefined));
+      return respondCreated(
+        res,
+        await this.documents.ingestFile(file.originalname, file.buffer, owner, language as string | undefined, tags),
+      );
     } catch (err) {
       if (err instanceof ExtractionError) throw new BadRequestException(err.message);
       throw err;
