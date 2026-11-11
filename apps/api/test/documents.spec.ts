@@ -184,7 +184,7 @@ describe('document language', () => {
     const { db, svc } = service();
     await svc.create({ title: 'Guide', content, language: 'german' });
     const doc = db.calls.find((c: { sql: string }) => /INSERT INTO documents/.test(c.sql));
-    expect(doc.params[doc.params.length - 1]).toBe('german');
+    expect(doc.params[8]).toBe('german'); // language is the ninth insert parameter, tags the tenth
     const chunks = db.calls.find((c: { sql: string }) => /INSERT INTO chunks/.test(c.sql));
     expect(chunks.params[5]).toBe('german');
   });

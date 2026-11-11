@@ -27,7 +27,7 @@ const CLASSIFIED = [
   { controller: QueryController, reads: [], safeWrites: ['ask', 'stream'], blocked: [] },
   {
     controller: DocumentsController,
-    reads: ['list', 'get'],
+    reads: ['list', 'listTags', 'get'],
     safeWrites: [],
     blocked: ['create', 'upload', 'reindexAll', 'update', 'reindex', 'remove'],
   },
