@@ -6,11 +6,13 @@ import 'reflect-metadata';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
+import { randomBytes } from 'crypto';
 import { readdir, readFile } from 'fs/promises';
 import { AddressInfo } from 'net';
 import { join, resolve } from 'path';
-import { Client } from 'pg';
+import { Client, Pool } from 'pg';
 import { APP_CONFIG, AppConfig } from '../src/config';
+import { Migration, runMigrations } from '../src/database/migrator';
 import { titleFrom } from '../src/documents/documents.dto';
 import { DocumentsService } from '../src/documents/documents.service';
 import { evaluate, evaluateAnswers } from '../src/eval/evaluate';
@@ -1057,5 +1059,126 @@ describeIfDb('request ids on the real routes (e2e)', () => {
     const line = JSON.parse(lines.find((l) => l.includes('my-trace-id-0001'))!);
     expect(line).toMatchObject({ context: 'http', route: '/query/stream', status: 200, requestId: 'my-trace-id-0001' });
     expect(line.query).toMatchObject({ retrieved: expect.any(Number), retrieveMs: expect.any(Number) });
+  });
+});
+
+/**
+ * A throwaway schema inside the test database, with a pool whose search_path points at it, so migration tests
+ * never touch the tables the other suites use. The advisory lock is database-wide, which is what we want:
+ * a worker migrating the shared schema waits for these tests, and they for it.
+ */
+async function scratchSchema() {
+  const schema = `mig_${randomBytes(4).toString('hex')}`;
+  const admin = new Client({ connectionString: DB });
+  await admin.connect();
+  await admin.query('CREATE EXTENSION IF NOT EXISTS vector');
+  await admin.query(`CREATE SCHEMA ${schema}`);
+  const pool = new Pool({ connectionString: DB, max: 4, options: `-c search_path=${schema},public` });
+  return {
+    schema,
+    pool,
+    async drop() {
+      await pool.end();
+      await admin.query(`DROP SCHEMA ${schema} CASCADE`);
+      await admin.end();
+    },
+  };
+}
+
+describeIfDb('migration runner (e2e)', () => {
+  let scratch: Awaited<ReturnType<typeof scratchSchema>>;
+  beforeEach(async () => {
+    scratch = await scratchSchema();
+  });
+  afterEach(async () => {
+    await scratch.drop();
+  });
+
+  const ctx = { embeddingDim: 8 };
+  const create = (id: number, name: string, sql: string): Migration => ({
+    id,
+    name,
+    up: async (client) => void (await client.query(sql)),
+  });
+  const recorded = async () =>
+    (await scratch.pool.query('SELECT id, name FROM schema_migrations ORDER BY id')).rows;
+
+  it('applies pending migrations in order, records them, and applies nothing the second time', async () => {
+    const list = [create(1, 'one', 'CREATE TABLE a (x int)'), create(2, 'two', 'CREATE TABLE b (x int)')];
+    expect((await runMigrations(scratch.pool, list, ctx)).map((x) => x.id)).toEqual([1, 2]);
+    expect(await recorded()).toEqual([
+      { id: 1, name: 'one' },
+      { id: 2, name: 'two' },
+    ]);
+    expect(await runMigrations(scratch.pool, list, ctx)).toEqual([]);
+  });
+
+  it('runs only the new migration when one is added later', async () => {
+    const one = create(1, 'one', 'CREATE TABLE a (x int)');
+    await runMigrations(scratch.pool, [one], ctx);
+    const two = create(2, 'two', 'CREATE TABLE b (x int)');
+    expect((await runMigrations(scratch.pool, [one, two], ctx)).map((x) => x.id)).toEqual([2]);
+  });
+
+  it('passes the embedding dimension to a migration', async () => {
+    const seen: number[] = [];
+    await runMigrations(scratch.pool, [{ id: 1, name: 'dim', up: async (_c, c) => void seen.push(c.embeddingDim) }], ctx);
+    expect(seen).toEqual([8]);
+  });
+
+  it('rolls a failing migration back completely, keeps earlier ones, and retries it on the next run', async () => {
+    const one = create(1, 'one', 'CREATE TABLE a (x int)');
+    const broken: Migration = {
+      id: 2,
+      name: 'broken',
+      up: async (client) => {
+        await client.query('CREATE TABLE half (x int)');
+        await client.query('SELECT 1/0');
+      },
+    };
+    await expect(runMigrations(scratch.pool, [one, broken], ctx)).rejects.toThrow(/Migration 2 \(broken\) failed/);
+    expect(await recorded()).toEqual([{ id: 1, name: 'one' }]);
+    const half = await scratch.pool.query("SELECT to_regclass('half') AS t");
+    expect(half.rows[0].t).toBeNull();
+
+    const fixed = create(2, 'broken', 'CREATE TABLE half (x int)');
+    expect((await runMigrations(scratch.pool, [one, fixed], ctx)).map((x) => x.id)).toEqual([2]);
+  });
+
+  it('applies each migration once when two runners start at the same time', async () => {
+    const list: Migration[] = [
+      {
+        id: 1,
+        name: 'slow',
+        up: async (client) => {
+          await client.query('CREATE TABLE runs (x int)');
+          await client.query('SELECT pg_sleep(0.3)');
+          await client.query('INSERT INTO runs VALUES (1)');
+        },
+      },
+    ];
+    const results = await Promise.all([runMigrations(scratch.pool, list, ctx), runMigrations(scratch.pool, list, ctx)]);
+    expect(results.map((r) => r.length).sort()).toEqual([0, 1]);
+    expect((await scratch.pool.query('SELECT count(*)::int AS n FROM runs')).rows[0].n).toBe(1);
+  });
+
+  it('refuses a database that has a migration this build does not know', async () => {
+    const one = create(1, 'one', 'CREATE TABLE a (x int)');
+    await runMigrations(scratch.pool, [one], ctx);
+    await scratch.pool.query("INSERT INTO schema_migrations (id, name) VALUES (2, 'from_the_future')");
+    await expect(runMigrations(scratch.pool, [one], ctx)).rejects.toThrow(/2 \(from_the_future\).*newer/s);
+  });
+
+  it('refuses a database whose recorded name for an id differs from the code', async () => {
+    await runMigrations(scratch.pool, [create(1, 'one', 'CREATE TABLE a (x int)')], ctx);
+    await expect(runMigrations(scratch.pool, [create(1, 'renamed', 'CREATE TABLE a (x int)')], ctx)).rejects.toThrow(
+      /migration 1 is "one".*"renamed"/s,
+    );
+  });
+
+  it('leaves the lock free for the next runner after a failure', async () => {
+    const broken = create(1, 'broken', 'SELECT 1/0');
+    await expect(runMigrations(scratch.pool, [broken], ctx)).rejects.toThrow();
+    await expect(runMigrations(scratch.pool, [create(1, 'broken', 'SELECT 1')], ctx)).resolves.toHaveLength(1);
   });
 });
