@@ -21,6 +21,7 @@ import { evaluate, evaluateAnswers } from '../src/eval/evaluate';
 import { Judge } from '../src/eval/judge';
 import { JobsService } from '../src/jobs/jobs.service';
 import { EMBEDDING_PROVIDER, EmbeddingProvider } from '../src/providers/types';
+import { DocumentFilter } from '../src/query/document-filter';
 import { QueryService } from '../src/query/query.service';
 import { bullet, makeDocx, makePdf, para } from './helpers/office';
 
@@ -1791,3 +1792,167 @@ describeIfDb('document tags (e2e)', () => {
     }
   });
 });
+
+function filterSuite(title: string, env: Record<string, string>) {
+  describeIfDb(title, () => {
+    let app: INestApplication;
+    let base: string;
+
+    beforeAll(async () => {
+      Object.assign(process.env, {
+        DATABASE_URL: DB,
+        EMBEDDING_PROVIDER: 'mock',
+        CHAT_PROVIDER: 'mock',
+        EMBEDDING_DIM: '256',
+        API_KEYS: '',
+        DEMO_MODE: '',
+        FTS_LANGUAGE: '',
+        RATE_LIMIT_PER_MIN: '0',
+        RATE_LIMIT_COSTLY_PER_MIN: '0',
+        EXACT_SEARCH_MAX_CHUNKS: '',
+        ...env,
+      });
+      const { AppModule } = await import('../src/app.module');
+      const { configureApp } = await import('../src/app.setup');
+      const { APP_CONFIG } = await import('../src/config');
+      const nest = await NestFactory.create<NestExpressApplication>(AppModule, { logger: false });
+      configureApp(nest, nest.get(APP_CONFIG));
+      await nest.listen(0);
+      app = nest;
+      base = `http://127.0.0.1:${(nest.getHttpServer().address() as AddressInfo).port}`;
+    });
+    afterAll(async () => {
+      process.env.EXACT_SEARCH_MAX_CHUNKS = '';
+      await app?.close();
+    });
+
+    const db = () => app.get(DatabaseService);
+    const docs = () => app.get(DocumentsService);
+    const created: string[] = [];
+    afterEach(async () => {
+      await Promise.all(created.splice(0).map((id) => db().query('DELETE FROM documents WHERE id = $1', [id])));
+    });
+    /** Every document mentions "invoice" so an unfiltered question finds all of them. */
+    const add = async (title: string, opts: { tags?: string[]; source?: string; date?: string; owner?: string } = {}) => {
+      const doc = await docs().create(
+        { title, content: `The invoice policy for ${title}. Filters-marker ${title}.`, tags: opts.tags, source: opts.source },
+        opts.owner ?? 'default',
+      );
+      created.push(doc.id);
+      if (opts.date) await db().query('UPDATE documents SET created_at = $2 WHERE id = $1', [doc.id, opts.date]);
+      return doc;
+    };
+    const titles = async (filter: DocumentFilter | undefined, owner = 'default') =>
+      (await app.get(QueryService).retrieve('invoice policy', 10, filter, owner)).map((c) => c.title).sort();
+    const vec = async (q: string) => toVector((await app.get<EmbeddingProvider>(EMBEDDING_PROVIDER).embed([q]))[0]);
+
+    it('retrieves only documents with any of the given tags', async () => {
+      await add('F-billing', { tags: ['billing'] });
+      await add('F-pricing', { tags: ['pricing', 'extra'] });
+      await add('F-untagged');
+      expect(await titles(undefined)).toEqual(['F-billing', 'F-pricing', 'F-untagged']);
+      expect(await titles({ tags: ['billing'] })).toEqual(['F-billing']);
+      expect(await titles({ tags: ['billing', 'extra'] })).toEqual(['F-billing', 'F-pricing']);
+      expect(await titles({ tags: ['nothing'] })).toEqual([]);
+    });
+
+    it('filters by source, exactly', async () => {
+      await add('F-a', { source: 'f-a.md' });
+      await add('F-b', { source: 'f-b.md' });
+      expect(await titles({ source: 'f-a.md' })).toEqual(['F-a']);
+      expect(await titles({ source: 'f-a' })).toEqual([]);
+    });
+
+    it('filters by date: after is inclusive, before is exclusive', async () => {
+      await add('F-jan', { date: '2026-01-10T00:00:00Z' });
+      await add('F-feb', { date: '2026-02-10T00:00:00Z' });
+      await add('F-mar', { date: '2026-03-10T00:00:00Z' });
+      expect(await titles({ createdAfter: '2026-02-10T00:00:00.000Z' })).toEqual(['F-feb', 'F-mar']);
+      expect(await titles({ createdBefore: '2026-02-10T00:00:00.000Z' })).toEqual(['F-jan']);
+      expect(await titles({ createdAfter: '2026-01-15T00:00:00.000Z', createdBefore: '2026-03-01T00:00:00.000Z' })).toEqual(['F-feb']);
+    });
+
+    it('combines every filter with AND, and with documentIds', async () => {
+      const a = await add('F-both', { tags: ['billing'], source: 'f.md', date: '2026-02-10T00:00:00Z' });
+      await add('F-tag-only', { tags: ['billing'], source: 'other.md', date: '2026-02-10T00:00:00Z' });
+      await add('F-late', { tags: ['billing'], source: 'f.md', date: '2026-06-10T00:00:00Z' });
+      const filter = { tags: ['billing'], source: 'f.md', createdBefore: '2026-03-01T00:00:00.000Z' };
+      expect(await titles(filter)).toEqual(['F-both']);
+      expect(await titles({ ...filter, documentIds: [a.id] })).toEqual(['F-both']);
+      expect(await titles({ ...filter, documentIds: ['00000000-0000-0000-0000-000000000000'] })).toEqual([]);
+    });
+
+    it("never returns another user's documents, however the filter is set", async () => {
+      await add('F-bob', { tags: ['shared-tag'], owner: 'bob' });
+      await add('F-alice', { tags: ['shared-tag'], owner: 'alice' });
+      expect(await titles({ tags: ['shared-tag'] }, 'alice')).toEqual(['F-alice']);
+      expect(await titles({ tags: ['shared-tag'] }, 'bob')).toEqual(['F-bob']);
+    });
+
+    it('applies the filter to the vector search and to the keyword search alike', async () => {
+      await add('F-billing', { tags: ['billing'] });
+      await add('F-pricing', { tags: ['pricing'] });
+      const query = app.get(QueryService) as any;
+      const filter = { tags: ['billing'] };
+      const v = await vec('invoice policy');
+      expect((await query.vectorSearch(v, 10, 'default', filter)).map((r: any) => r.title)).toEqual(['F-billing']);
+      expect((await query.lexicalSearch(v, 'invoice policy', 10, 'default', filter)).map((r: any) => r.title)).toEqual(['F-billing']);
+      expect((await query.lexicalSearch(v, 'invoice policy', 10, 'default', { tags: ['none'] })).map((r: any) => r.title)).toEqual([]);
+    });
+
+    const post = (path: string, body: unknown) =>
+      fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+
+    it('filters /query and /query/stream, and answers "no passages" when nothing matches', async () => {
+      await add('F-billing', { tags: ['billing'], date: '2026-02-10T00:00:00Z' });
+      await add('F-pricing', { tags: ['pricing'] });
+      const hit = await readJson(await post('/query', { question: 'invoice policy', tags: ['Billing'] }));
+      expect(hit.sources.map((s: any) => s.title)).toEqual(['F-billing']);
+      const byDate = await readJson(await post('/query', { question: 'invoice policy', createdAfter: '2026-02-10', createdBefore: '2026-02-11' }));
+      expect(byDate.sources.map((s: any) => s.title)).toEqual(['F-billing']);
+
+      const none = await post('/query', { question: 'invoice policy', tags: ['nothing'] });
+      expect(none.status).toBe(200);
+      expect((await readJson(none)).sources).toEqual([]);
+
+      const stream = await post('/query/stream', { question: 'invoice policy', tags: ['nothing'] });
+      expect(stream.status).toBe(200);
+      const events = parseSse(await stream.text());
+      expect(events.find((e) => e.event === 'sources')!.data.sources).toEqual([]);
+      expect(events.at(-1)!.event).toBe('done');
+    });
+
+    it('answers 400 for bad filters on both question routes', async () => {
+      for (const body of [
+        { question: 'q', createdAfter: 'yesterday' },
+        { question: 'q', createdBefore: 'not a date' },
+        { question: 'q', tags: ['<script>'] },
+        { question: 'q', tags: [1] },
+        { question: 'q', tags: Array.from({ length: 21 }, (_, i) => `t${i}`) },
+        { question: 'q', source: 5 },
+      ]) {
+        expect((await post('/query', body)).status).toBe(400);
+        expect((await post('/query/stream', body)).status).toBe(400);
+      }
+    });
+
+    it('does not depend on the database time zone', async () => {
+      await add('F-edge', { date: '2026-02-10T00:00:00Z' });
+      const client = await db().pool.connect();
+      try {
+        await client.query("SET TIME ZONE 'Pacific/Auckland'");
+        const { rows } = await client.query(
+          "SELECT title FROM documents d WHERE d.title = 'F-edge' AND d.created_at >= $1::timestamptz AND d.created_at < $2::timestamptz",
+          ['2026-02-10T00:00:00.000Z', '2026-02-10T00:00:01.000Z'],
+        );
+        expect(rows).toHaveLength(1);
+      } finally {
+        await client.query('RESET TIME ZONE');
+        client.release();
+      }
+    });
+  });
+}
+
+filterSuite('metadata filters on the real routes (e2e)', {});
+filterSuite('metadata filters on the approximate index path (e2e)', { EXACT_SEARCH_MAX_CHUNKS: '0' });
