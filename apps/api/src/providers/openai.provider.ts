@@ -34,8 +34,8 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
         if (embedding.length !== this.dimensions) {
           throw new Error(
             `Embedding model "${this.model}" returned ${embedding.length}-dimensional vectors but ` +
-              `EMBEDDING_DIM=${this.dimensions}. Set EMBEDDING_DIM to ${embedding.length} (and re-create the ` +
-              'chunks table) or choose a model that matches.',
+              `EMBEDDING_DIM=${this.dimensions}. Set EMBEDDING_DIM to ${embedding.length} (see "Changing the ` +
+              'embedding dimension" in the README) or choose a model that matches.',
           );
         }
         out.push(embedding);

@@ -99,6 +99,10 @@ The daily cap bounds how many questions are answered, but the only hard limit on
   docker compose start api web
   ```
 
+### Database changes
+
+The API applies any pending schema migrations when it starts and records them in the `schema_migrations` table, so an update needs no extra step. Take a backup (above) before every update: migrations only go forward, and going back means restoring that backup. From this version on, an older image started against a newer database refuses to start and says so (an image from before migrations existed does not check, and could fail later on a changed table); update the image rather than editing `schema_migrations`. Starting several API containers at once is safe, they take turns.
+
 ### Changing the database password
 
 `POSTGRES_PASSWORD` only takes effect when the database volume is first created. If you already started the stack and want a different password, change it in the database first, then in `.env`:
