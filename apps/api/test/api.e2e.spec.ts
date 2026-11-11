@@ -1220,7 +1220,12 @@ describeIfDb('schema migrations on real schemas (e2e)', () => {
       expect.arrayContaining(['documents_owner_hash_idx', 'ingestion_jobs_queue_idx', 'chunks_document_idx', 'chunks_fts_idx', 'chunks_embedding_idx']),
     );
     expect(idx).not.toContain('documents_content_hash_idx');
-    expect((await scratch.pool.query('SELECT id, name FROM schema_migrations')).rows).toEqual([{ id: 1, name: 'baseline' }]);
+    expect((await scratch.pool.query('SELECT id, name FROM schema_migrations ORDER BY id')).rows).toEqual([
+      { id: 1, name: 'baseline' },
+      { id: 2, name: 'document_language' },
+    ]);
+    expect(await columns('documents')).toContain('language');
+    expect(await columns('chunks')).toContain('language');
   });
 
   it('skips the HNSW index above 2000 dimensions, as before', async () => {
@@ -1242,22 +1247,47 @@ describeIfDb('schema migrations on real schemas (e2e)', () => {
 
     await runMigrations(scratch.pool, migrations, ctx);
 
-    const kept = await q('SELECT title, owner_id, content_hash, content FROM documents');
-    expect(kept.rows).toEqual([{ title: 'Old', owner_id: 'default', content_hash: null, content: null }]);
+    const kept = await q('SELECT title, owner_id, content_hash, content, language FROM documents');
+    expect(kept.rows).toEqual([{ title: 'Old', owner_id: 'default', content_hash: null, content: null, language: 'english' }]);
     const chunk = await q("SELECT count(*)::int AS n FROM chunks WHERE fts @@ plainto_tsquery('english', 'words')");
     expect(chunk.rows[0].n).toBe(1);
-    expect((await q('SELECT id FROM schema_migrations')).rows).toEqual([{ id: 1 }]);
+    expect((await q('SELECT id FROM schema_migrations ORDER BY id')).rows).toEqual([{ id: 1 }, { id: 2 }]);
+  });
+
+  it('migration 2 gives existing rows the english language and keeps them searchable, then supports other languages', async () => {
+    await runMigrations(scratch.pool, migrations.slice(0, 1), ctx);
+    const q = (sql: string, p: unknown[] = []) => scratch.pool.query(sql, p);
+    const doc = await q("INSERT INTO documents (title, char_count, chunk_count) VALUES ('Old', 12, 1) RETURNING id");
+    await q("INSERT INTO chunks (document_id, ordinal, heading, content, embedding) VALUES ($1, 0, 'H', 'The invoices are paid yearly', '[1,0,0,0,0,0,0,0]')", [doc.rows[0].id]);
+
+    expect((await runMigrations(scratch.pool, migrations, ctx)).map((m) => m.id)).toEqual([2]);
+
+    expect((await q('SELECT language FROM documents')).rows).toEqual([{ language: 'english' }]);
+    expect((await q('SELECT language::text AS language FROM chunks')).rows).toEqual([{ language: 'english' }]);
+    expect((await q("SELECT count(*)::int AS n FROM chunks WHERE fts @@ to_tsquery('english', 'invoice')")).rows[0].n).toBe(1);
+
+    // New chunks are indexed with their own language: German stems "Rechnungen" to "rechnung", English does not.
+    const text = 'Die Rechnungen werden jährlich bezahlt';
+    const insert = (language: string) =>
+      q("INSERT INTO chunks (document_id, ordinal, content, embedding, language) VALUES ($1, 1, $2, '[0,1,0,0,0,0,0,0]', $3::regconfig)", [doc.rows[0].id, text, language]);
+    await insert('german');
+    await insert('english');
+    const hits = await q(
+      "SELECT language::text AS language FROM chunks WHERE content = $1 AND fts @@ to_tsquery('german', 'rechnung')",
+      [text],
+    );
+    expect(hits.rows).toEqual([{ language: 'german' }]);
   });
 
   it('adopts a database that already has the current schema but no tracking table', async () => {
-    await runMigrations(scratch.pool, migrations, ctx);
+    await runMigrations(scratch.pool, migrations.slice(0, 1), ctx); // the schema as it was before migration 2
     await scratch.pool.query("INSERT INTO documents (title, char_count, content_hash) VALUES ('Kept', 5, 'h1')");
-    await scratch.pool.query('DROP TABLE schema_migrations'); // what a database from before this change looks like
+    await scratch.pool.query('DROP TABLE schema_migrations'); // what a database from before versioned migrations looks like
 
-    await expect(runMigrations(scratch.pool, migrations, ctx)).resolves.toHaveLength(1);
+    await expect(runMigrations(scratch.pool, migrations, ctx)).resolves.toHaveLength(2);
 
     expect((await scratch.pool.query('SELECT title FROM documents')).rows).toEqual([{ title: 'Kept' }]);
-    expect((await scratch.pool.query('SELECT id FROM schema_migrations')).rows).toEqual([{ id: 1 }]);
+    expect((await scratch.pool.query('SELECT id FROM schema_migrations ORDER BY id')).rows).toEqual([{ id: 1 }, { id: 2 }]);
   });
 });
 
@@ -1269,10 +1299,10 @@ describeIfDb('DatabaseService startup (e2e)', () => {
   afterEach(async () => {
     await scratch.drop();
   });
-  const service = (embeddingDim: number) => {
+  const service = (embeddingDim: number, ftsLanguage = 'english') => {
     const url = new URL(DB!);
     url.searchParams.set('options', `-c search_path=${scratch.schema},public`);
-    return new DatabaseService({ databaseUrl: url.toString(), embeddingDim } as AppConfig);
+    return new DatabaseService({ databaseUrl: url.toString(), embeddingDim, ftsLanguage } as AppConfig);
   };
 
   it('migrates on start and starts again without error', async () => {
@@ -1281,7 +1311,7 @@ describeIfDb('DatabaseService startup (e2e)', () => {
     await first.onModuleDestroy();
     const second = service(8);
     await second.onModuleInit();
-    expect((await second.query('SELECT id FROM schema_migrations')).rows).toEqual([{ id: 1 }]);
+    expect((await second.query('SELECT id FROM schema_migrations ORDER BY id')).rows).toEqual([{ id: 1 }, { id: 2 }]);
     await second.onModuleDestroy();
   });
 
@@ -1292,5 +1322,16 @@ describeIfDb('DatabaseService startup (e2e)', () => {
     const other = service(16);
     await expect(other.onModuleInit()).rejects.toThrow(/8 dimensions but EMBEDDING_DIM=16.*README/s);
     await other.onModuleDestroy();
+  });
+
+  it('lists the text search configurations, and refuses an unknown FTS_LANGUAGE naming the choices', async () => {
+    const ok = service(8);
+    await ok.onModuleInit();
+    expect([...ok.textSearchConfigs]).toEqual(expect.arrayContaining(['english', 'german', 'simple']));
+    await ok.onModuleDestroy();
+
+    const bad = service(8, 'klingon');
+    await expect(bad.onModuleInit()).rejects.toThrow(/FTS_LANGUAGE=klingon.*english.*german/s);
+    await bad.onModuleDestroy();
   });
 });

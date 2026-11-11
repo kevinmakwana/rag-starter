@@ -11,6 +11,8 @@ export const toVector = (v: number[]): string => `[${v.join(',')}]`;
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(DatabaseService.name);
   readonly pool: Pool;
+  /** The languages full-text search can use here; filled when the module starts. */
+  textSearchConfigs: ReadonlySet<string> = new Set();
 
   constructor(@Inject(APP_CONFIG) private readonly cfg: AppConfig) {
     this.pool = new Pool({ connectionString: cfg.databaseUrl, max: 10 });
@@ -19,6 +21,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   async onModuleInit(): Promise<void> {
     const applied = await runMigrations(this.pool, migrations, { embeddingDim: this.cfg.embeddingDim });
     await this.checkEmbeddingDim();
+    await this.loadTextSearchConfigs();
     this.logger.log(
       `Schema ready (vector(${this.cfg.embeddingDim}))` +
         (applied.length ? `, applied ${applied.map((m) => `${m.id} ${m.name}`).join(', ')}` : ''),
@@ -45,6 +48,20 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       throw err;
     } finally {
       client.release();
+    }
+  }
+
+  /** The languages full-text search can use here: every text search configuration visible to this database. */
+  private async loadTextSearchConfigs(): Promise<void> {
+    const { rows } = await this.query<{ cfgname: string }>(
+      'SELECT cfgname FROM pg_ts_config WHERE pg_ts_config_is_visible(oid) ORDER BY cfgname',
+    );
+    this.textSearchConfigs = new Set(rows.map((r) => r.cfgname));
+    if (!this.textSearchConfigs.has(this.cfg.ftsLanguage)) {
+      throw new Error(
+        `FTS_LANGUAGE=${this.cfg.ftsLanguage} is not a text search configuration of this database. ` +
+          `Available: ${[...this.textSearchConfigs].join(', ')}.`,
+      );
     }
   }
 
