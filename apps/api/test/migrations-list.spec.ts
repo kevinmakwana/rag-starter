@@ -25,4 +25,5 @@ describe('validateMigrations', () => {
 it('the real migration list is valid and starts with the baseline', () => {
   expect(() => validateMigrations(migrations)).not.toThrow();
   expect(migrations[0]).toMatchObject({ id: 1, name: 'baseline' });
+  expect(migrations[1]).toMatchObject({ id: 2, name: 'document_language' });
 });

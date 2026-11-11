@@ -147,14 +147,14 @@ The schema is versioned. The API applies pending migrations when it starts and r
 |---|---|---|---|
 | `GET` | `/health` | | DB check, active providers and embedding model; `status` is `degraded` if some documents were embedded with a different model |
 | `GET` | `/documents` | | List indexed documents |
-| `POST` | `/documents` | `{ title, content }` | Index pasted text (≤ 500k chars). Identical content is never indexed twice: you get the existing document back (`duplicate: true`, HTTP 200). Returns 409 if the index was built with a different embedding model |
-| `POST` | `/documents/upload` | multipart `file` | `.md`, `.markdown`, `.txt`, `.pdf`, `.docx` (≤ 10 MB); first `# H1` becomes the title, else the file name. Word headings, lists and tables are kept as Markdown; unreadable, password-protected or scanned (no text layer, no OCR) files get a 400 that says why |
+| `POST` | `/documents` | `{ title, content, language? }` | Index pasted text (≤ 500k chars). Identical content is never indexed twice: you get the existing document back (`duplicate: true`, HTTP 200). Returns 409 if the index was built with a different embedding model |
+| `POST` | `/documents/upload` | multipart `file`, optional text field `language` | `.md`, `.markdown`, `.txt`, `.pdf`, `.docx` (≤ 10 MB); first `# H1` becomes the title, else the file name. Word headings, lists and tables are kept as Markdown; unreadable, password-protected or scanned (no text layer, no OCR) files get a 400 that says why |
 | `GET` | `/documents/:id` | | The document with its full source text (`content` is `null` for documents indexed before text was stored) |
-| `PUT` | `/documents/:id` | `{ title?, content? }` | Change title and/or text; the document is re-chunked and re-embedded atomically (id and date kept). 409 if the new text duplicates another document |
+| `PUT` | `/documents/:id` | `{ title?, content?, language? }` | Change title, text and/or [language](#languages); the document is re-chunked and re-embedded atomically (id and date kept). 409 if the new text duplicates another document |
 | `POST` | `/documents/:id/reindex` | | Re-index from the stored text with the current chunk settings and embedding model |
 | `POST` | `/documents/reindex` | | Re-index every document; returns `{ reindexed, skipped, failed }`. The fix after switching embedding model |
-| `POST` | `/jobs/documents` | `{ title, content }` | Same as `POST /documents` but in the background: answers `202` with a job |
-| `POST` | `/jobs/upload` | multipart `file` | Same as `POST /documents/upload`, extraction included, in the background (an unsupported file type is still a `400` straight away) |
+| `POST` | `/jobs/documents` | `{ title, content, language? }` | Same as `POST /documents` but in the background: answers `202` with a job |
+| `POST` | `/jobs/upload` | multipart `file`, optional `language` | Same as `POST /documents/upload`, extraction included, in the background (an unsupported file type is still a `400` straight away) |
 | `POST` | `/jobs/reindex` | | Re-index everything in the background, with progress |
 | `GET` | `/jobs/:id` | | `status` (`queued`, `running`, `succeeded`, `failed`), `progress`, and the `result` or `error`; `GET /jobs` lists recent jobs |
 | `DELETE` | `/documents/:id` | | Removes the document and its chunks |
@@ -210,7 +210,7 @@ samples/                  fictional docs to try it with
 
 ## Configuration
 
-All settings live in the root `.env` (see [`.env.example`](.env.example)): providers and models, `EMBEDDING_DIM`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `TOP_K`, `MIN_SCORE`, `SEARCH_MODE`, `EXACT_SEARCH_MAX_CHUNKS`, `RERANKER`, `HISTORY_MESSAGES`, ports and CORS.
+All settings live in the root `.env` (see [`.env.example`](.env.example)): providers and models, `EMBEDDING_DIM`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `TOP_K`, `MIN_SCORE`, `SEARCH_MODE`, `FTS_LANGUAGE`, `EXACT_SEARCH_MAX_CHUNKS`, `RERANKER`, `HISTORY_MESSAGES`, ports and CORS.
 
 ## Authentication and users
 
@@ -273,6 +273,7 @@ Slow work (parsing a big PDF, embedding hundreds of chunks, re-indexing everythi
 
 - **File formats:** `.pdf` goes through `unpdf` (PDF.js) and `.docx` through `mammoth`, whose HTML is converted to Markdown so headings, lists and tables reach the chunker. Extractors are small objects in `ingestion/extractors.ts`, so another format is one more entry. Files are parsed in-process, so only expose uploads to people you trust. `npm audit` lists `sprintf-js` (via `argparse` via `mammoth`) as moderate with no patched release; only mammoth's command-line script loads it, never the library code used here.
 
+- <a id="languages"></a>**Languages:** every document has a `language`, the Postgres text search configuration its keyword search uses: `english` (the default), `german`, `french`, `spanish`, ..., or `simple` for no stemming (an unknown name is a `400` that lists the available ones). It sets stemming and stop words for the keyword half of hybrid search; the vector half needs no language. Send it as `language` when you paste, upload (multipart text field), update or queue a document; leave it out to use `FTS_LANGUAGE`. The question needs no language: each document is searched with its own, so one corpus can mix several. Changing a document's language re-indexes it. Identical text is still one document whichever language is sent: you get the existing one back, with its own language. The web app uses the default language, and changing `FTS_LANGUAGE` later does not change the language of documents already indexed (update them, or re-index after setting a language on each). Upgrading an existing database to this version rewrites the `chunks` table once, see [Database changes](docs/deployment.md#database-changes). Chinese, Japanese and Korean have no Postgres parser: use `simple` and rely on vector search (`SEARCH_MODE=vector`).
 - **Re-ranking** (`RERANKER=llm`): retrieval fetches three times as many passages, the chat model orders them in one extra call, and the top `TOP_K` are kept. Off by default; any failure falls back to the retrieval order.
 - **Exact search for small corpora:** HNSW is approximate, and entries of deleted chunks stay in the index until `VACUUM`. In testing, an index full of them returned no live rows at all, and at other times a full page of rows that were not the true nearest (it depends on the random graph, so it showed up on CI but not locally). Up to `EXACT_SEARCH_MAX_CHUNKS` chunks (default 20000, a few tens of milliseconds at most) vector search is therefore exact. Above that it uses the HNSW index and re-runs exactly if the index returns fewer rows than requested, but recall can still dip after large deletes until autovacuum catches up: vacuum regularly and consider raising `hnsw.ef_search` for big corpora.
 

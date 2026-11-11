@@ -24,6 +24,8 @@ export interface AppConfig {
   minScore: number;
   /** `hybrid` fuses vector search with Postgres full-text search; `vector` uses embeddings only. */
   searchMode: SearchMode;
+  /** Text search configuration for documents indexed without a language of their own (see FTS_LANGUAGE). */
+  ftsLanguage: string;
   /** "json" prints one JSON object per log line (for jq or a log shipper); "text" is readable in a terminal. */
   logFormat: 'text' | 'json';
   /** Up to this many chunks, vector search is exact instead of using the approximate HNSW index (0 = always HNSW). */
@@ -66,6 +68,14 @@ function oneOf<T extends string>(name: string, allowed: readonly T[], fallback: 
   return raw;
 }
 
+function configName(name: string, fallback: string): string {
+  const raw = (process.env[name] ?? fallback).trim().toLowerCase() || fallback;
+  if (!/^[a-z_]{1,40}$/.test(raw)) {
+    throw new Error(`${name} must be a text search configuration name such as english, german or simple, got "${process.env[name]}"`);
+  }
+  return raw;
+}
+
 function wholeNumber(name: string, fallback: number): number {
   const value = int(name, fallback);
   if (!Number.isInteger(value) || value < 0) throw new Error(`${name} must be a whole number, 0 or more`);
@@ -100,6 +110,7 @@ export function loadConfig(): AppConfig {
     topK: int('TOP_K', 5),
     minScore: 0,
     searchMode: oneOf('SEARCH_MODE', ['vector', 'hybrid'] as const, 'hybrid'),
+    ftsLanguage: configName('FTS_LANGUAGE', 'english'),
     logFormat: oneOf('LOG_FORMAT', ['text', 'json'] as const, 'text'),
     exactSearchMaxChunks: int('EXACT_SEARCH_MAX_CHUNKS', 20000),
     auth: { keys: new Map(parseApiKeys(process.env.API_KEYS).map(({ key, user }) => [hashKey(key), user])) },

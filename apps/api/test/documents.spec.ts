@@ -1,10 +1,10 @@
 import 'reflect-metadata';
-import { ConflictException } from '@nestjs/common';
+import { BadRequestException, ConflictException } from '@nestjs/common';
 import { AppConfig } from '../src/config';
 import { DocumentsService, hashContent } from '../src/documents/documents.service';
 import { MockEmbeddingProvider } from '../src/providers/mock.provider';
 
-const cfg = { chunkSize: 800, chunkOverlap: 120 } as AppConfig;
+const cfg = { chunkSize: 800, chunkOverlap: 120, ftsLanguage: 'english' } as AppConfig;
 
 const docRow = (overrides: Record<string, unknown> = {}) => ({
   id: '11111111-1111-1111-1111-111111111111',
@@ -13,6 +13,7 @@ const docRow = (overrides: Record<string, unknown> = {}) => ({
   char_count: 30,
   chunk_count: 1,
   created_at: new Date('2026-01-01T00:00:00Z'),
+  language: 'english',
   ...overrides,
 });
 
@@ -45,6 +46,7 @@ function fakeDb({ existing = null, inserted = docRow(), otherModels = [] }: Fake
   };
   return {
     calls,
+    textSearchConfigs: new Set(['english', 'german', 'simple']),
     query: async (sql: string, params: unknown[] = []) => {
       calls.push({ sql, params });
       if (/embedding_model/.test(sql)) return { rows: otherModels.map((m) => ({ embedding_model: m, n: 3 })) };
@@ -154,9 +156,10 @@ describe('chunk insertion', () => {
     const db = fakeDb({ existing: null });
     await new DocumentsService(cfg, new CountingEmbeddings(64), db).create({ title: 'Guide', content });
 
-    const [, ordinals, headings, contents, vectors] = db.calls.find((c: { sql: string }) =>
+    const [, ordinals, headings, contents, vectors, language] = db.calls.find((c: { sql: string }) =>
       /INSERT INTO chunks/.test(c.sql),
     ).params;
+    expect(language).toBe('english');
     expect(ordinals).toEqual([0, 1, 2]);
     expect(headings).toEqual(['A', 'B', 'C']);
     expect(contents).toEqual(['alpha text', 'bravo text', 'charlie text']);
@@ -170,5 +173,38 @@ describe('chunk insertion', () => {
 
     const params = db.calls.find((c: { sql: string }) => /INSERT INTO chunks/.test(c.sql)).params;
     expect(params[2]).toEqual([null]);
+  });
+});
+
+describe('document language', () => {
+  const content = '# Guide\n\nDie Rechnungen werden jährlich bezahlt.';
+  const service = (db = fakeDb({ existing: null })) => ({ db, svc: new DocumentsService(cfg, new CountingEmbeddings(64), db) });
+
+  it('stores the requested language on the document and its chunks', async () => {
+    const { db, svc } = service();
+    await svc.create({ title: 'Guide', content, language: 'german' });
+    const doc = db.calls.find((c: { sql: string }) => /INSERT INTO documents/.test(c.sql));
+    expect(doc.params[doc.params.length - 1]).toBe('german');
+    const chunks = db.calls.find((c: { sql: string }) => /INSERT INTO chunks/.test(c.sql));
+    expect(chunks.params[5]).toBe('german');
+  });
+
+  it('falls back to FTS_LANGUAGE, and normalises what it is given', () => {
+    const { svc } = service();
+    expect(svc.resolveLanguage(undefined)).toBe('english');
+    expect(svc.resolveLanguage('  ')).toBe('english');
+    expect(svc.resolveLanguage(' German ')).toBe('german');
+  });
+
+  it('rejects a language the database does not have, naming the ones it does, before embedding anything', async () => {
+    const embeddings = new CountingEmbeddings(64);
+    const svc = new DocumentsService(cfg, embeddings, fakeDb({ existing: null }));
+    await expect(svc.create({ title: 'x', content, language: 'klingon' })).rejects.toThrow(BadRequestException);
+    await expect(svc.create({ title: 'x', content, language: 'klingon' })).rejects.toThrow(/english, german, simple/);
+    expect(embeddings.calls).toBe(0);
+  });
+
+  it('rejects a value that is not text', () => {
+    expect(() => service().svc.resolveLanguage(['german', 'french'])).toThrow(/text value/);
   });
 });

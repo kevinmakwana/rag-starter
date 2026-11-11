@@ -12,7 +12,7 @@ import { AddressInfo } from 'net';
 import { join, resolve } from 'path';
 import { Client, Pool } from 'pg';
 import { APP_CONFIG, AppConfig } from '../src/config';
-import { DatabaseService } from '../src/database/database.service';
+import { DatabaseService, toVector } from '../src/database/database.service';
 import { Migration, runMigrations } from '../src/database/migrator';
 import { migrations } from '../src/database/migrations';
 import { titleFrom } from '../src/documents/documents.dto';
@@ -1220,7 +1220,26 @@ describeIfDb('schema migrations on real schemas (e2e)', () => {
       expect.arrayContaining(['documents_owner_hash_idx', 'ingestion_jobs_queue_idx', 'chunks_document_idx', 'chunks_fts_idx', 'chunks_embedding_idx']),
     );
     expect(idx).not.toContain('documents_content_hash_idx');
-    expect((await scratch.pool.query('SELECT id, name FROM schema_migrations')).rows).toEqual([{ id: 1, name: 'baseline' }]);
+    expect((await scratch.pool.query('SELECT id, name FROM schema_migrations ORDER BY id')).rows).toEqual([
+      { id: 1, name: 'baseline' },
+      { id: 2, name: 'document_language' },
+    ]);
+    expect(await columns('documents')).toContain('language');
+    expect(await columns('chunks')).toContain('language');
+  });
+
+  it('uses no regconfig column, which would stop pg_upgrade from moving the database to a new major version', async () => {
+    await runMigrations(scratch.pool, migrations, ctx);
+    const { rows } = await scratch.pool.query(
+      `SELECT c.relname || '.' || a.attname AS col
+         FROM pg_attribute a
+         JOIN pg_class c ON c.oid = a.attrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = $1 AND a.attnum > 0 AND NOT a.attisdropped
+          AND a.atttypid IN ('regconfig'::regtype, 'regclass'::regtype, 'regproc'::regtype, 'regdictionary'::regtype)`,
+      [scratch.schema],
+    );
+    expect(rows).toEqual([]);
   });
 
   it('skips the HNSW index above 2000 dimensions, as before', async () => {
@@ -1242,22 +1261,47 @@ describeIfDb('schema migrations on real schemas (e2e)', () => {
 
     await runMigrations(scratch.pool, migrations, ctx);
 
-    const kept = await q('SELECT title, owner_id, content_hash, content FROM documents');
-    expect(kept.rows).toEqual([{ title: 'Old', owner_id: 'default', content_hash: null, content: null }]);
+    const kept = await q('SELECT title, owner_id, content_hash, content, language FROM documents');
+    expect(kept.rows).toEqual([{ title: 'Old', owner_id: 'default', content_hash: null, content: null, language: 'english' }]);
     const chunk = await q("SELECT count(*)::int AS n FROM chunks WHERE fts @@ plainto_tsquery('english', 'words')");
     expect(chunk.rows[0].n).toBe(1);
-    expect((await q('SELECT id FROM schema_migrations')).rows).toEqual([{ id: 1 }]);
+    expect((await q('SELECT id FROM schema_migrations ORDER BY id')).rows).toEqual([{ id: 1 }, { id: 2 }]);
+  });
+
+  it('migration 2 gives existing rows the english language and keeps them searchable, then supports other languages', async () => {
+    await runMigrations(scratch.pool, migrations.slice(0, 1), ctx);
+    const q = (sql: string, p: unknown[] = []) => scratch.pool.query(sql, p);
+    const doc = await q("INSERT INTO documents (title, char_count, chunk_count) VALUES ('Old', 12, 1) RETURNING id");
+    await q("INSERT INTO chunks (document_id, ordinal, heading, content, embedding) VALUES ($1, 0, 'H', 'The invoices are paid yearly', '[1,0,0,0,0,0,0,0]')", [doc.rows[0].id]);
+
+    expect((await runMigrations(scratch.pool, migrations, ctx)).map((m) => m.id)).toEqual([2]);
+
+    expect((await q('SELECT language FROM documents')).rows).toEqual([{ language: 'english' }]);
+    expect((await q('SELECT language::text AS language FROM chunks')).rows).toEqual([{ language: 'english' }]);
+    expect((await q("SELECT count(*)::int AS n FROM chunks WHERE fts @@ to_tsquery('english', 'invoice')")).rows[0].n).toBe(1);
+
+    // New chunks are indexed with their own language: German stems "Rechnungen" to "rechnung", English does not.
+    const text = 'Die Rechnungen werden jährlich bezahlt';
+    const insert = (language: string) =>
+      q("INSERT INTO chunks (document_id, ordinal, content, embedding, language) VALUES ($1, 1, $2, '[0,1,0,0,0,0,0,0]', $3)", [doc.rows[0].id, text, language]);
+    await insert('german');
+    await insert('english');
+    const hits = await q(
+      "SELECT language::text AS language FROM chunks WHERE content = $1 AND fts @@ to_tsquery('german', 'rechnung')",
+      [text],
+    );
+    expect(hits.rows).toEqual([{ language: 'german' }]);
   });
 
   it('adopts a database that already has the current schema but no tracking table', async () => {
-    await runMigrations(scratch.pool, migrations, ctx);
+    await runMigrations(scratch.pool, migrations.slice(0, 1), ctx); // the schema as it was before migration 2
     await scratch.pool.query("INSERT INTO documents (title, char_count, content_hash) VALUES ('Kept', 5, 'h1')");
-    await scratch.pool.query('DROP TABLE schema_migrations'); // what a database from before this change looks like
+    await scratch.pool.query('DROP TABLE schema_migrations'); // what a database from before versioned migrations looks like
 
-    await expect(runMigrations(scratch.pool, migrations, ctx)).resolves.toHaveLength(1);
+    await expect(runMigrations(scratch.pool, migrations, ctx)).resolves.toHaveLength(2);
 
     expect((await scratch.pool.query('SELECT title FROM documents')).rows).toEqual([{ title: 'Kept' }]);
-    expect((await scratch.pool.query('SELECT id FROM schema_migrations')).rows).toEqual([{ id: 1 }]);
+    expect((await scratch.pool.query('SELECT id FROM schema_migrations ORDER BY id')).rows).toEqual([{ id: 1 }, { id: 2 }]);
   });
 });
 
@@ -1269,10 +1313,10 @@ describeIfDb('DatabaseService startup (e2e)', () => {
   afterEach(async () => {
     await scratch.drop();
   });
-  const service = (embeddingDim: number) => {
+  const service = (embeddingDim: number, ftsLanguage = 'english') => {
     const url = new URL(DB!);
     url.searchParams.set('options', `-c search_path=${scratch.schema},public`);
-    return new DatabaseService({ databaseUrl: url.toString(), embeddingDim } as AppConfig);
+    return new DatabaseService({ databaseUrl: url.toString(), embeddingDim, ftsLanguage } as AppConfig);
   };
 
   it('migrates on start and starts again without error', async () => {
@@ -1281,7 +1325,7 @@ describeIfDb('DatabaseService startup (e2e)', () => {
     await first.onModuleDestroy();
     const second = service(8);
     await second.onModuleInit();
-    expect((await second.query('SELECT id FROM schema_migrations')).rows).toEqual([{ id: 1 }]);
+    expect((await second.query('SELECT id FROM schema_migrations ORDER BY id')).rows).toEqual([{ id: 1 }, { id: 2 }]);
     await second.onModuleDestroy();
   });
 
@@ -1292,5 +1336,258 @@ describeIfDb('DatabaseService startup (e2e)', () => {
     const other = service(16);
     await expect(other.onModuleInit()).rejects.toThrow(/8 dimensions but EMBEDDING_DIM=16.*README/s);
     await other.onModuleDestroy();
+  });
+
+  it('lists the text search configurations, and refuses an unknown FTS_LANGUAGE naming the choices', async () => {
+    const ok = service(8);
+    await ok.onModuleInit();
+    expect([...ok.textSearchConfigs]).toEqual(expect.arrayContaining(['english', 'german', 'simple']));
+    await ok.onModuleDestroy();
+
+    const bad = service(8, 'klingon');
+    await expect(bad.onModuleInit()).rejects.toThrow(/FTS_LANGUAGE=klingon.*english.*german/s);
+    await bad.onModuleDestroy();
+  });
+});
+
+describeIfDb('document language (e2e)', () => {
+  let app: INestApplication;
+  let base: string;
+  const GERMAN = 'Die Rechnungen werden jährlich bezahlt. Kündigungen sind monatlich möglich.';
+
+  beforeAll(async () => {
+    Object.assign(process.env, {
+      DATABASE_URL: DB,
+      EMBEDDING_PROVIDER: 'mock',
+      CHAT_PROVIDER: 'mock',
+      EMBEDDING_DIM: '256',
+      API_KEYS: '',
+      DEMO_MODE: '',
+      FTS_LANGUAGE: '',
+      RATE_LIMIT_PER_MIN: '0',
+      RATE_LIMIT_COSTLY_PER_MIN: '0',
+    });
+    const { AppModule } = await import('../src/app.module');
+    const { configureApp } = await import('../src/app.setup');
+    const { APP_CONFIG } = await import('../src/config');
+    const nest = await NestFactory.create<NestExpressApplication>(AppModule, { logger: false });
+    configureApp(nest, nest.get(APP_CONFIG));
+    await nest.listen(0);
+    app = nest;
+    base = `http://127.0.0.1:${(nest.getHttpServer().address() as AddressInfo).port}`;
+  });
+  afterAll(async () => {
+    await app?.close();
+  });
+
+  const json = (method: string, path: string, body: unknown) =>
+    fetch(`${base}${path}`, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const upload = (path: string, language: string | undefined, text: string, name: string) => {
+    const form = new FormData();
+    form.append('file', new Blob([text]), name);
+    if (language !== undefined) form.append('language', language);
+    return fetch(`${base}${path}`, { method: 'POST', body: form });
+  };
+  const remove = (id: string) => fetch(`${base}/documents/${id}`, { method: 'DELETE' });
+  const languagesOf = async (id: string) =>
+    (await app.get(DatabaseService).query('SELECT language::text AS l FROM chunks WHERE document_id = $1', [id])).rows.map((r: any) => r.l);
+  const waitForJob = async (id: string) => {
+    for (let i = 0; i < 100; i++) {
+      const j = await readJson(await fetch(`${base}/jobs/${id}`));
+      if (j.status === 'succeeded' || j.status === 'failed') return j;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error('job did not finish');
+  };
+
+  it('defaults to english, reports the language, and stores it on the chunks', async () => {
+    const res = await json('POST', '/documents', { title: 'Invoices en', content: 'The invoices are paid yearly. Unique-marker-one.' });
+    const doc = await readJson(res);
+    expect(res.status).toBe(201);
+    expect(doc.language).toBe('english');
+    expect(new Set(await languagesOf(doc.id))).toEqual(new Set(['english']));
+    expect((await readJson(await fetch(`${base}/documents/${doc.id}`))).language).toBe('english');
+    await remove(doc.id);
+  });
+
+  it('indexes a document in the language it is given, normalising case and spaces', async () => {
+    const res = await json('POST', '/documents', { title: 'Rechnungen', content: `${GERMAN} Unique-marker-two.`, language: ' German ' });
+    const doc = await readJson(res);
+    expect(doc.language).toBe('german');
+    expect(new Set(await languagesOf(doc.id))).toEqual(new Set(['german']));
+    await remove(doc.id);
+  });
+
+  it('answers 400 with the valid names for an unknown language on paste, upload, update and both job routes', async () => {
+    const ok = await readJson(await json('POST', '/documents', { title: 'Ok', content: 'Some text to keep. Unique-marker-three.' }));
+    for (const res of [
+      await json('POST', '/documents', { title: 'x', content: 'text', language: 'klingon' }),
+      await json('POST', '/documents', { title: 'x', content: 'text', language: 'DE' }),
+      await upload('/documents/upload', 'klingon', 'text to index', 'x.txt'),
+      await json('PUT', `/documents/${ok.id}`, { language: 'klingon' }),
+      await json('POST', '/jobs/documents', { title: 'x', content: 'text', language: 'klingon' }),
+      await upload('/jobs/upload', 'klingon', 'text to index', 'x.txt'),
+    ]) {
+      expect(res.status).toBe(400);
+      expect(JSON.stringify(await readJson(res))).toMatch(/english.*german/s);
+    }
+    await remove(ok.id);
+  });
+
+  it('takes the language from a multipart upload field', async () => {
+    const res = await upload('/documents/upload', 'french', 'Les factures sont payées chaque année. Unique-marker-four.', 'factures.txt');
+    const doc = await readJson(res);
+    expect(res.status).toBe(201);
+    expect(doc.language).toBe('french');
+    expect(new Set(await languagesOf(doc.id))).toEqual(new Set(['french']));
+    await remove(doc.id);
+  });
+
+  it('changing only the language re-indexes the document without touching its text, and re-index keeps it', async () => {
+    const doc = await readJson(await json('POST', '/documents', { title: 'Switch', content: `${GERMAN} Unique-marker-five.` }));
+    expect(doc.language).toBe('english');
+
+    const updated = await readJson(await json('PUT', `/documents/${doc.id}`, { language: 'german' }));
+    expect(updated.language).toBe('german');
+    expect(updated.chunkCount).toBe(doc.chunkCount);
+    expect(new Set(await languagesOf(doc.id))).toEqual(new Set(['german']));
+    expect((await readJson(await fetch(`${base}/documents/${doc.id}`))).content).toContain('Kündigungen');
+
+    const again = await readJson(await fetch(`${base}/documents/${doc.id}/reindex`, { method: 'POST' }));
+    expect(again.language).toBe('german');
+    expect(new Set(await languagesOf(doc.id))).toEqual(new Set(['german']));
+    await remove(doc.id);
+  });
+
+  it('still refuses an update that changes nothing', async () => {
+    const doc = await readJson(await json('POST', '/documents', { title: 'Nothing', content: 'Plain text. Unique-marker-six.' }));
+    expect((await json('PUT', `/documents/${doc.id}`, {})).status).toBe(400);
+    await remove(doc.id);
+  });
+
+  it('returns the existing document, with its own language, when the same text is sent again in another language', async () => {
+    const first = await readJson(await json('POST', '/documents', { title: 'Dup', content: 'Same words here. Unique-marker-seven.', language: 'english' }));
+    const second = await json('POST', '/documents', { title: 'Dup', content: 'Same words here. Unique-marker-seven.', language: 'german' });
+    expect(second.status).toBe(200);
+    expect(await readJson(second)).toMatchObject({ id: first.id, duplicate: true, language: 'english' });
+    await remove(first.id);
+  });
+
+  it('passes the language through the background job routes', async () => {
+    const text = await readJson(await json('POST', '/jobs/documents', { title: 'Job de', content: `${GERMAN} Unique-marker-eight.`, language: 'german' }));
+    expect((await waitForJob(text.id)).status).toBe('succeeded');
+    const created = (await readJson(await fetch(`${base}/documents`))).find((d: any) => d.title === 'Job de');
+    expect(created.language).toBe('german');
+    await remove(created.id);
+
+    const file = await readJson(await upload('/jobs/upload', 'french', 'Les factures sont payées. Unique-marker-nine.', 'job-fr.txt'));
+    expect((await waitForJob(file.id)).status).toBe('succeeded');
+    const createdFile = (await readJson(await fetch(`${base}/documents`))).find((d: any) => d.source === 'job-fr.txt');
+    expect(createdFile.language).toBe('french');
+    await remove(createdFile.id);
+  });
+
+  it('resolves the default language when a job leaves it out', async () => {
+    const text = await readJson(await json('POST', '/jobs/documents', { title: 'Job default', content: 'Default language words. Unique-marker-ten.' }));
+    expect((await waitForJob(text.id)).status).toBe('succeeded');
+    const created = (await readJson(await fetch(`${base}/documents`))).find((d: any) => d.title === 'Job default');
+    expect(created.language).toBe('english');
+    await remove(created.id);
+  });
+});
+
+describeIfDb('multilingual keyword search (e2e)', () => {
+  let app: INestApplication;
+
+  beforeAll(async () => {
+    Object.assign(process.env, {
+      DATABASE_URL: DB,
+      EMBEDDING_PROVIDER: 'mock',
+      CHAT_PROVIDER: 'mock',
+      EMBEDDING_DIM: '256',
+      API_KEYS: '',
+      DEMO_MODE: '',
+      FTS_LANGUAGE: '',
+    });
+    const { AppModule } = await import('../src/app.module');
+    app = await NestFactory.create<NestExpressApplication>(AppModule, { logger: false });
+    await app.init();
+  });
+  afterAll(async () => {
+    await app?.close();
+  });
+
+  const ids: string[] = [];
+  const add = async (title: string, content: string, language: string, owner = 'default') => {
+    const doc = await app.get(DocumentsService).create({ title, content, language }, owner);
+    ids.push(doc.id);
+    return doc;
+  };
+  afterEach(async () => {
+    await Promise.all(ids.splice(0).map((id) => app.get(DatabaseService).query('DELETE FROM documents WHERE id = $1', [id])));
+  });
+
+  /** The keyword half only: the mock embeddings are bag-of-words, so a vector match could hide a keyword miss. */
+  const lexical = async (question: string, owner = 'default', documentIds?: string[]) => {
+    const [embedding] = await app.get<EmbeddingProvider>(EMBEDDING_PROVIDER).embed([question]);
+    const rows = await (app.get(QueryService) as any).lexicalSearch(toVector(embedding), question, 20, owner, documentIds);
+    return (rows as { title: string }[]).map((r) => r.title);
+  };
+
+  const DE = 'Die Rechnungen werden jährlich bezahlt. Kündigungen sind monatlich möglich.';
+
+  it('finds a German document by an inflected word only when it is indexed as german', async () => {
+    await add('DE as german', DE, 'german');
+    await add('DE as english', `${DE} Anderer Text.`, 'english');
+    // Index side: German stems "Rechnungen" to "rechnung"; indexed as English it stays "rechnungen".
+    expect(await lexical('Rechnung')).toEqual(['DE as german']);
+  });
+
+  it('stems the question with the language of each document it searches', async () => {
+    await add('DE as german', DE, 'german');
+    await add('DE as english', `${DE} Anderer Text.`, 'english');
+    // Query side: "Rechnungen" is "rechnung" for the German document and stays "rechnungen" for the English one;
+    // a single fixed configuration would find only one of the two.
+    expect((await lexical('Rechnungen')).sort()).toEqual(['DE as english', 'DE as german']);
+  });
+
+  it('searches a mixed corpus in one question, each document with its own language', async () => {
+    await add('DE', DE, 'german');
+    await add('EN', 'The invoices are paid yearly and cancellations are monthly.', 'english');
+    await add('FR', 'Les factures sont payées chaque année.', 'french');
+    expect((await lexical('Rechnung invoice facture')).sort()).toEqual(['DE', 'EN', 'FR']);
+  });
+
+  it('keeps the search inside the given documents', async () => {
+    const de = await add('DE', DE, 'german');
+    await add('EN', 'The invoices are paid yearly.', 'english');
+    expect(await lexical('Rechnung invoice', 'default', [de.id])).toEqual(['DE']);
+  });
+
+  it("does not look at another user's documents or languages", async () => {
+    await add('Bob DE', DE, 'german', 'bob');
+    await add('Alice EN', 'The invoices are paid yearly.', 'english', 'alice');
+    expect(await lexical('Rechnung invoice', 'alice')).toEqual(['Alice EN']);
+    expect(await lexical('Rechnung invoice', 'bob')).toEqual(['Bob DE']);
+  });
+
+  it('returns nothing, rather than failing, for a question of only stop words in the document language', async () => {
+    await add('DE', DE, 'german');
+    expect(await lexical('die der das')).toEqual([]);
+  });
+
+  it('copes with apostrophes, accents and punctuation in the question', async () => {
+    await add('FR', 'Les étés sont chauds. Les factures sont payées.', 'french');
+    // "été" is itself a French stop word; the content word is "factures". Everything else is punctuation to survive.
+    expect(await lexical("l'été, c'est ça? (les factures) & | ! :")).toEqual(['FR']);
+  });
+
+  it('finds a Hindi document, whose words contain combining vowel signs', async () => {
+    await add('HI', 'हिन्दी भाषा की पुस्तक', 'hindi');
+    expect(await lexical('हिन्दी')).toEqual(['HI']);
+  });
+
+  it('still answers a question when no document matches', async () => {
+    expect(await lexical('zzzzqqqq')).toEqual([]);
   });
 });
