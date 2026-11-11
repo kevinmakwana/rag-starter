@@ -34,7 +34,7 @@ Retrieval quality and answer quality:
 
 - [x] **Answer-quality eval.** The eval set only measures retrieval (hit rate, MRR). Add a groundedness check (an LLM judge, or "is each citation supported by its chunk") to the eval script, guarded in the test suite with the mock provider.
 - [x] **Multilingual full-text search.** Each document has a `language` (a Postgres text search configuration, default `FTS_LANGUAGE`, itself `english`): migration 2 regenerates the `fts` column from it, and keyword search queries each language present with its own configuration, so hybrid search works for other languages and mixed corpora. Language detection and a web picker are left out.
-- [ ] **Metadata filters and tags.** Filter queries by tag, source or date, not only by `documentIds`.
+- [x] **Metadata filters and tags.** Documents carry tags (migration 3, `text[]` with a GIN index); `/query` and `/query/stream` filter by tags (any of), source, and indexed-at range, combined with AND and with `documentIds`, in both halves of hybrid search; `GET /documents` filters by tag and source and `GET /documents/tags` lists them with counts. A tags-only update re-indexes nothing. A tag/filter UI is left to the document-management item.
 - [ ] **More ingestion sources.** HTML and URL ingestion as new extractors.
 - [ ] **Token-based chunk sizing (carried over from Phase 2).** See above; opt-in `CHUNK_UNIT`.
 
