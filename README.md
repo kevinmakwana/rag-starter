@@ -111,9 +111,25 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 **Self-hosted or other OpenAI-compatible servers** (Ollama, vLLM, LM Studio): keep `EMBEDDING_PROVIDER`/`CHAT_PROVIDER` on `openai`, set `OPENAI_BASE_URL` (for Ollama `http://localhost:11434/v1`), name your models in `OPENAI_EMBEDDING_MODEL`/`OPENAI_CHAT_MODEL`, and leave the key empty. Set `EMBEDDING_DIM` to the model's size (768 for `nomic-embed-text`); the API checks every returned vector against it and says so if they differ. `dimensions` is only sent to `text-embedding-3` models. `ANTHROPIC_MAX_TOKENS` (default 1024) caps the length of Claude's answers.
 
-`EMBEDDING_DIM` must match the embedding model (1536 for `text-embedding-3-small`). If you change it, drop the `chunks` table and re-ingest. The API refuses to start on a mismatch rather than failing at query time.
+`EMBEDDING_DIM` must match the embedding model (1536 for `text-embedding-3-small`). The API refuses to start on a mismatch rather than failing at query time. To change it, see [Changing the embedding dimension](#changing-the-embedding-dimension).
 
 > Switching from mock to OpenAI embeddings? (Also re-index after upgrading to the title-aware chunker if you want older documents to benefit.) Re-index: vectors from different models aren't comparable. Each document records the embedding model it was indexed with, so the API logs a warning at startup, reports `degraded` on `/health`, and refuses to add documents (409) while the index mixes models. Documents indexed before this was tracked have no recorded model and are not flagged. Call `POST /documents/reindex` (the web app shows a **Re-index all** button when it notices a mix). Documents indexed before source text was stored are skipped and must be uploaded again; a fresh start, `docker compose down -v && npm run db:up && npm run seed`, also works.
+
+### Changing the embedding dimension
+
+The size of the vector column is fixed when the database is created, so a different `EMBEDDING_DIM` needs the column resized. Stored vectors from another model are useless anyway, so empty the chunks and re-index from the stored text:
+
+```bash
+docker compose exec -T db psql -U rag -d rag -c 'TRUNCATE chunks' -c 'ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(768)'   # your new size
+# set EMBEDDING_DIM=768 (and the model) in .env, restart the API, then:
+curl -X POST http://localhost:4000/documents/reindex
+```
+
+Documents indexed before the source text was stored are skipped by the re-index and must be uploaded again. Until it has run, `/health` reports `degraded`.
+
+### Changing the database schema
+
+The schema is versioned. The API applies pending migrations when it starts and records them in `schema_migrations`. To change the schema, add `apps/api/src/database/migrations/000N-what-it-does.ts` (an `id`, a `name` and an `up(client, { embeddingDim })` that runs in a transaction), append it to `migrations/index.ts`, and never edit or reorder one that has been released. Migrations only go forward; to go back, restore a backup.
 
 ## API
 
@@ -170,7 +186,7 @@ apps/
   api/                    NestJS
     src/
       config.ts           typed env config with validation
-      database/           pg pool, idempotent schema + dimension check
+      database/           pg pool, versioned migrations (migrations/), dimension check
       ingestion/chunker.ts  heading-aware chunking (pure, unit-tested)
       providers/          EmbeddingProvider / ChatProvider + OpenAI, Anthropic, mock
       documents/          ingest, upload, list, delete

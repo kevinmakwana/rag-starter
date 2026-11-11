@@ -44,7 +44,7 @@ Deployment and operations:
 - [x] **Rate limiting.** Two tiers (general, and a lower one for routes that call a model) per user or, with auth off, per client IP, in memory; `429` with `Retry-After`; an explicit JSON body limit that fits the 500,000-character document cap.
 - [x] **Demo mode.** `DEMO_MODE=true`: a deny-by-default read-only guard, samples indexed at startup, a global daily question cap, and a read-only web UI with starter questions.
 - [x] **Public deployment guide.** `docker-compose.prod.yml` puts Caddy (automatic HTTPS) in front on one domain, publishes nothing else, and requires a database password; `docs/deployment.md` covers DNS, firewall, demo settings, the provider spend cap, updates, backups, restoring and changing the password. Real certificate issuance and client addresses on a live server are untested and flagged as such in the guide.
-- [ ] **Real migrations.** Replace the inline `ALTER ... IF NOT EXISTS` statements in `database.service.ts` with versioned migrations once the schema changes again.
+- [x] **Real migrations.** Versioned, forward-only migrations (`apps/api/src/database/migrations/`) recorded in `schema_migrations`, applied under an advisory lock at startup; the old schema is the baseline. Changing `EMBEDDING_DIM` is now a documented `ALTER` plus re-index.
 - [x] **Observability.** `X-Request-Id` on every response and one structured log line per request (route pattern, status, duration), plus per-question phase timings and the tokens each model call used; `LOG_FORMAT=json` for jq. Questions, answers and addresses are never logged. OpenTelemetry and a metrics endpoint are not done: the request context in `src/observability/` is the hook.
 - [ ] **OpenAPI docs.** Generate Swagger docs for the API.
 
