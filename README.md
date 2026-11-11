@@ -117,15 +117,25 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 ### Changing the embedding dimension
 
-The size of the vector column is fixed when the database is created, so a different `EMBEDDING_DIM` needs the column resized. Stored vectors from another model are useless anyway, so empty the chunks and re-index from the stored text:
+The size of the vector column is fixed when the database is created, so a different `EMBEDDING_DIM` needs the column resized. Vectors from another model are useless anyway, so empty the chunks and re-index from the stored text. Stop the API first, and run the statements as one transaction so a failure changes nothing:
 
 ```bash
-docker compose exec -T db psql -U rag -d rag -c 'TRUNCATE chunks' -c 'ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(768)'   # your new size
-# set EMBEDDING_DIM=768 (and the model) in .env, restart the API, then:
+docker compose stop api
+docker compose exec -T db psql -U rag -d rag -v ON_ERROR_STOP=1 -1 <<'SQL'
+DROP INDEX IF EXISTS chunks_embedding_idx;
+TRUNCATE chunks;
+ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(768);   -- your new size
+-- Only if the new size is 2000 or less (the index type cannot go higher); otherwise search stays exact:
+CREATE INDEX chunks_embedding_idx ON chunks USING hnsw (embedding vector_cosine_ops);
+SQL
+# set EMBEDDING_DIM=768 (and the model) in .env, then:
+docker compose up -d api
 curl -X POST http://localhost:4000/documents/reindex
 ```
 
-Documents indexed before the source text was stored are skipped by the re-index and must be uploaded again. Until it has run, `/health` reports `degraded`.
+- Re-indexing works on the stored text. Documents indexed before the source text was stored are skipped and must be uploaded again.
+- It re-indexes the caller's documents only, so with `API_KEYS` set every user must run it with their own key (or **Re-index all** in the web app). Until all of them have, `/health` reports `degraded` and uploads answer `409`.
+- A read-only demo (`DEMO_MODE=true`) refuses `POST /documents/reindex`. There, replace `TRUNCATE chunks;` with `DELETE FROM documents;` and skip the curl: the sample documents are indexed again when the API starts.
 
 ### Changing the database schema
 

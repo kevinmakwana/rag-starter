@@ -101,7 +101,7 @@ The daily cap bounds how many questions are answered, but the only hard limit on
 
 ### Database changes
 
-The API applies any pending schema migrations when it starts and records them in the `schema_migrations` table, so an update needs no extra step. Take a backup (above) before updating to a version that adds one: migrations only go forward, and going back means restoring that backup. If an older image is started against a newer database it refuses to start and says so; update the image rather than editing `schema_migrations`. Starting several API containers at once is safe, they take turns.
+The API applies any pending schema migrations when it starts and records them in the `schema_migrations` table, so an update needs no extra step. Take a backup (above) before every update: migrations only go forward, and going back means restoring that backup. From this version on, an older image started against a newer database refuses to start and says so (an image from before migrations existed does not check, and could fail later on a changed table); update the image rather than editing `schema_migrations`. Starting several API containers at once is safe, they take turns.
 
 ### Changing the database password
 
