@@ -19,6 +19,12 @@ export class CreateDocumentDto {
   @IsString()
   @MaxLength(200)
   source?: string;
+
+  /** Text search configuration for keyword search (english, german, ...); defaults to FTS_LANGUAGE. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  language?: string;
 }
 
 export class UpdateDocumentDto {
@@ -33,6 +39,12 @@ export class UpdateDocumentDto {
   @IsNotEmpty()
   @MaxLength(MAX_DOCUMENT_CHARS)
   content?: string;
+
+  /** Text search configuration for keyword search (english, german, ...); defaults to FTS_LANGUAGE. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  language?: string;
 }
 
 export interface DocumentSummary {
@@ -42,6 +54,8 @@ export interface DocumentSummary {
   charCount: number;
   chunkCount: number;
   createdAt: string;
+  /** The text search configuration its keyword search uses (english, german, ...). */
+  language: string;
   /** True when identical content was already indexed and the existing document is returned. */
   duplicate: boolean;
 }

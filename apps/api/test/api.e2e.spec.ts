@@ -1335,3 +1335,149 @@ describeIfDb('DatabaseService startup (e2e)', () => {
     await bad.onModuleDestroy();
   });
 });
+
+describeIfDb('document language (e2e)', () => {
+  let app: INestApplication;
+  let base: string;
+  const GERMAN = 'Die Rechnungen werden jährlich bezahlt. Kündigungen sind monatlich möglich.';
+
+  beforeAll(async () => {
+    Object.assign(process.env, {
+      DATABASE_URL: DB,
+      EMBEDDING_PROVIDER: 'mock',
+      CHAT_PROVIDER: 'mock',
+      EMBEDDING_DIM: '256',
+      API_KEYS: '',
+      DEMO_MODE: '',
+      FTS_LANGUAGE: '',
+      RATE_LIMIT_PER_MIN: '0',
+      RATE_LIMIT_COSTLY_PER_MIN: '0',
+    });
+    const { AppModule } = await import('../src/app.module');
+    const { configureApp } = await import('../src/app.setup');
+    const { APP_CONFIG } = await import('../src/config');
+    const nest = await NestFactory.create<NestExpressApplication>(AppModule, { logger: false });
+    configureApp(nest, nest.get(APP_CONFIG));
+    await nest.listen(0);
+    app = nest;
+    base = `http://127.0.0.1:${(nest.getHttpServer().address() as AddressInfo).port}`;
+  });
+  afterAll(async () => {
+    await app?.close();
+  });
+
+  const json = (method: string, path: string, body: unknown) =>
+    fetch(`${base}${path}`, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const upload = (path: string, language: string | undefined, text: string, name: string) => {
+    const form = new FormData();
+    form.append('file', new Blob([text]), name);
+    if (language !== undefined) form.append('language', language);
+    return fetch(`${base}${path}`, { method: 'POST', body: form });
+  };
+  const remove = (id: string) => fetch(`${base}/documents/${id}`, { method: 'DELETE' });
+  const languagesOf = async (id: string) =>
+    (await app.get(DatabaseService).query('SELECT language::text AS l FROM chunks WHERE document_id = $1', [id])).rows.map((r: any) => r.l);
+  const waitForJob = async (id: string) => {
+    for (let i = 0; i < 100; i++) {
+      const j = await readJson(await fetch(`${base}/jobs/${id}`));
+      if (j.status === 'succeeded' || j.status === 'failed') return j;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error('job did not finish');
+  };
+
+  it('defaults to english, reports the language, and stores it on the chunks', async () => {
+    const res = await json('POST', '/documents', { title: 'Invoices en', content: 'The invoices are paid yearly. Unique-marker-one.' });
+    const doc = await readJson(res);
+    expect(res.status).toBe(201);
+    expect(doc.language).toBe('english');
+    expect(new Set(await languagesOf(doc.id))).toEqual(new Set(['english']));
+    expect((await readJson(await fetch(`${base}/documents/${doc.id}`))).language).toBe('english');
+    await remove(doc.id);
+  });
+
+  it('indexes a document in the language it is given, normalising case and spaces', async () => {
+    const res = await json('POST', '/documents', { title: 'Rechnungen', content: `${GERMAN} Unique-marker-two.`, language: ' German ' });
+    const doc = await readJson(res);
+    expect(doc.language).toBe('german');
+    expect(new Set(await languagesOf(doc.id))).toEqual(new Set(['german']));
+    await remove(doc.id);
+  });
+
+  it('answers 400 with the valid names for an unknown language on paste, upload, update and both job routes', async () => {
+    const ok = await readJson(await json('POST', '/documents', { title: 'Ok', content: 'Some text to keep. Unique-marker-three.' }));
+    for (const res of [
+      await json('POST', '/documents', { title: 'x', content: 'text', language: 'klingon' }),
+      await json('POST', '/documents', { title: 'x', content: 'text', language: 'DE' }),
+      await upload('/documents/upload', 'klingon', 'text to index', 'x.txt'),
+      await json('PUT', `/documents/${ok.id}`, { language: 'klingon' }),
+      await json('POST', '/jobs/documents', { title: 'x', content: 'text', language: 'klingon' }),
+      await upload('/jobs/upload', 'klingon', 'text to index', 'x.txt'),
+    ]) {
+      expect(res.status).toBe(400);
+      expect(JSON.stringify(await readJson(res))).toMatch(/english.*german/s);
+    }
+    await remove(ok.id);
+  });
+
+  it('takes the language from a multipart upload field', async () => {
+    const res = await upload('/documents/upload', 'french', 'Les factures sont payées chaque année. Unique-marker-four.', 'factures.txt');
+    const doc = await readJson(res);
+    expect(res.status).toBe(201);
+    expect(doc.language).toBe('french');
+    expect(new Set(await languagesOf(doc.id))).toEqual(new Set(['french']));
+    await remove(doc.id);
+  });
+
+  it('changing only the language re-indexes the document without touching its text, and re-index keeps it', async () => {
+    const doc = await readJson(await json('POST', '/documents', { title: 'Switch', content: `${GERMAN} Unique-marker-five.` }));
+    expect(doc.language).toBe('english');
+
+    const updated = await readJson(await json('PUT', `/documents/${doc.id}`, { language: 'german' }));
+    expect(updated.language).toBe('german');
+    expect(updated.chunkCount).toBe(doc.chunkCount);
+    expect(new Set(await languagesOf(doc.id))).toEqual(new Set(['german']));
+    expect((await readJson(await fetch(`${base}/documents/${doc.id}`))).content).toContain('Kündigungen');
+
+    const again = await readJson(await fetch(`${base}/documents/${doc.id}/reindex`, { method: 'POST' }));
+    expect(again.language).toBe('german');
+    expect(new Set(await languagesOf(doc.id))).toEqual(new Set(['german']));
+    await remove(doc.id);
+  });
+
+  it('still refuses an update that changes nothing', async () => {
+    const doc = await readJson(await json('POST', '/documents', { title: 'Nothing', content: 'Plain text. Unique-marker-six.' }));
+    expect((await json('PUT', `/documents/${doc.id}`, {})).status).toBe(400);
+    await remove(doc.id);
+  });
+
+  it('returns the existing document, with its own language, when the same text is sent again in another language', async () => {
+    const first = await readJson(await json('POST', '/documents', { title: 'Dup', content: 'Same words here. Unique-marker-seven.', language: 'english' }));
+    const second = await json('POST', '/documents', { title: 'Dup', content: 'Same words here. Unique-marker-seven.', language: 'german' });
+    expect(second.status).toBe(200);
+    expect(await readJson(second)).toMatchObject({ id: first.id, duplicate: true, language: 'english' });
+    await remove(first.id);
+  });
+
+  it('passes the language through the background job routes', async () => {
+    const text = await readJson(await json('POST', '/jobs/documents', { title: 'Job de', content: `${GERMAN} Unique-marker-eight.`, language: 'german' }));
+    expect((await waitForJob(text.id)).status).toBe('succeeded');
+    const created = (await readJson(await fetch(`${base}/documents`))).find((d: any) => d.title === 'Job de');
+    expect(created.language).toBe('german');
+    await remove(created.id);
+
+    const file = await readJson(await upload('/jobs/upload', 'french', 'Les factures sont payées. Unique-marker-nine.', 'job-fr.txt'));
+    expect((await waitForJob(file.id)).status).toBe('succeeded');
+    const createdFile = (await readJson(await fetch(`${base}/documents`))).find((d: any) => d.source === 'job-fr.txt');
+    expect(createdFile.language).toBe('french');
+    await remove(createdFile.id);
+  });
+
+  it('resolves the default language when a job leaves it out', async () => {
+    const text = await readJson(await json('POST', '/jobs/documents', { title: 'Job default', content: 'Default language words. Unique-marker-ten.' }));
+    expect((await waitForJob(text.id)).status).toBe('succeeded');
+    const created = (await readJson(await fetch(`${base}/documents`))).find((d: any) => d.title === 'Job default');
+    expect(created.language).toBe('english');
+    await remove(created.id);
+  });
+});

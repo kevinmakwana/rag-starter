@@ -16,6 +16,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { Costly } from '../rate-limit/costly.decorator';
 import { CreateDocumentDto, MAX_UPLOAD_BYTES } from '../documents/documents.dto';
+import { DocumentsService } from '../documents/documents.service';
 import { isSupportedFile, SUPPORTED_EXTENSIONS } from '../ingestion/extractors';
 import { JobsService, JobView } from './jobs.service';
 
@@ -25,7 +26,10 @@ import { JobsService, JobView } from './jobs.service';
  */
 @Controller('jobs')
 export class JobsController {
-  constructor(@Inject(JobsService) private readonly jobs: JobsService) {}
+  constructor(
+    @Inject(JobsService) private readonly jobs: JobsService,
+    @Inject(DocumentsService) private readonly documents: DocumentsService,
+  ) {}
 
   @Get()
   list(@CurrentUser() owner: string): Promise<JobView[]> {
@@ -44,7 +48,7 @@ export class JobsController {
   @Post('documents')
   @HttpCode(202)
   indexText(@Body() dto: CreateDocumentDto, @CurrentUser() owner: string): Promise<JobView> {
-    return this.jobs.enqueue('ingest_text', { title: dto.title.trim(), payload: { ...dto }, owner });
+    return this.jobs.enqueue('ingest_text', { title: dto.title.trim(), payload: { ...dto, language: this.documents.resolveLanguage(dto.language) }, owner });
   }
 
   /** Index an uploaded file in the background; text extraction happens in the job too. */
@@ -52,14 +56,18 @@ export class JobsController {
   @Post('upload')
   @HttpCode(202)
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES } }))
-  upload(@CurrentUser() owner: string, @UploadedFile() file?: Express.Multer.File): Promise<JobView> {
+  upload(
+    @CurrentUser() owner: string,
+    @Body('language') language: unknown,
+    @UploadedFile() file?: Express.Multer.File,
+  ): Promise<JobView> {
     if (!file) throw new BadRequestException('Attach a file in the "file" field');
     if (!isSupportedFile(file.originalname)) {
       throw new BadRequestException(`Unsupported file type. Supported: ${SUPPORTED_EXTENSIONS.join(', ')}`);
     }
     return this.jobs.enqueue('ingest_file', {
       title: file.originalname,
-      payload: { filename: file.originalname },
+      payload: { filename: file.originalname, language: this.documents.resolveLanguage(language) },
       file: file.buffer,
       owner,
     });

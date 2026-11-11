@@ -61,11 +61,12 @@ export class DocumentsController {
   async upload(
     @CurrentUser() owner: string,
     @Res({ passthrough: true }) res: Response,
+    @Body('language') language: unknown,
     @UploadedFile() file?: Express.Multer.File,
   ): Promise<DocumentSummary> {
     if (!file) throw new BadRequestException('Attach a file in the "file" field');
     try {
-      return respondCreated(res, await this.documents.ingestFile(file.originalname, file.buffer, owner));
+      return respondCreated(res, await this.documents.ingestFile(file.originalname, file.buffer, owner, language as string | undefined));
     } catch (err) {
       if (err instanceof ExtractionError) throw new BadRequestException(err.message);
       throw err;

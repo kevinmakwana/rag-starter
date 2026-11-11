@@ -216,7 +216,12 @@ export class JobsService implements OnApplicationBootstrap, OnModuleDestroy {
       case 'ingest_text':
         return this.documents.create(job.payload as never, job.owner_id);
       case 'ingest_file':
-        return this.documents.ingestFile(String(job.payload?.filename), job.file ?? Buffer.alloc(0), job.owner_id);
+        return this.documents.ingestFile(
+          String(job.payload?.filename),
+          job.file ?? Buffer.alloc(0),
+          job.owner_id,
+          job.payload?.language as string | undefined,
+        );
       case 'reindex_all':
         return this.documents.reindexAll(job.owner_id, (done, total) =>
           this.db

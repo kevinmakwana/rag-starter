@@ -32,13 +32,14 @@ interface DocumentRow {
   char_count: number;
   chunk_count: number;
   created_at: Date;
+  language: string;
   /** Only selected where needed: the full text can be large. NULL for documents indexed before it was stored. */
   content?: string | null;
   content_hash?: string | null;
   owner_id?: string;
 }
 
-const SUMMARY_COLUMNS = 'id, title, source, char_count, chunk_count, created_at';
+const SUMMARY_COLUMNS = 'id, title, source, char_count, chunk_count, created_at, language';
 const NO_SOURCE_TEXT =
   'This document was indexed before its source text was stored, so there is nothing to re-index from. ' +
   'Upload it again (or send the new text with this request).';
@@ -62,6 +63,7 @@ const toSummary = (r: DocumentRow, duplicate = false): DocumentSummary => ({
   charCount: r.char_count,
   chunkCount: r.chunk_count,
   createdAt: r.created_at.toISOString(),
+  language: r.language,
   duplicate,
 });
 
@@ -114,6 +116,18 @@ export class DocumentsService implements OnApplicationBootstrap {
     return rows[0];
   }
 
+  /** The text search configuration for a request: its own, else FTS_LANGUAGE; one the database lacks is a client error. */
+  resolveLanguage(input?: unknown): string {
+    if (input != null && typeof input !== 'string') throw new BadRequestException('language must be a text value');
+    const name = (input ?? '').trim().toLowerCase() || this.cfg.ftsLanguage;
+    if (!this.db.textSearchConfigs.has(name)) {
+      throw new BadRequestException(
+        `Unknown language "${input}". Use one of: ${[...this.db.textSearchConfigs].join(', ')}.`,
+      );
+    }
+    return name;
+  }
+
   /** Chunk text the way the current settings say; a document with no text is a client error. */
   private chunk(content: string) {
     const chunks = chunkText(content, { chunkSize: this.cfg.chunkSize, chunkOverlap: this.cfg.chunkOverlap });
@@ -130,10 +144,10 @@ export class DocumentsService implements OnApplicationBootstrap {
    * One statement for every chunk: parallel arrays unnested into rows. (Also sidesteps the
    * 65,535 bind-parameter limit that a multi-row VALUES list would hit on big documents.)
    */
-  private async insertChunks(client: PoolClient, documentId: string, chunks: Chunk[], vectors: number[][]) {
+  private async insertChunks(client: PoolClient, documentId: string, chunks: Chunk[], vectors: number[][], language: string) {
     await client.query(
-      `INSERT INTO chunks (document_id, ordinal, heading, content, embedding)
-       SELECT $1, t.ordinal, t.heading, t.content, t.embedding::vector
+      `INSERT INTO chunks (document_id, ordinal, heading, content, embedding, language)
+       SELECT $1, t.ordinal, t.heading, t.content, t.embedding::vector, $6::regconfig
          FROM unnest($2::int[], $3::text[], $4::text[], $5::text[]) AS t(ordinal, heading, content, embedding)`,
       [
         documentId,
@@ -141,12 +155,14 @@ export class DocumentsService implements OnApplicationBootstrap {
         chunks.map((c) => c.heading),
         chunks.map((c) => c.content),
         vectors.map(toVector),
+        language,
       ],
     );
   }
 
   /** Index a document. Content that is already indexed returns the existing one (`duplicate: true`). */
   async create(dto: CreateDocumentDto, owner = DEFAULT_OWNER): Promise<DocumentSummary> {
+    const language = this.resolveLanguage(dto.language);
     const content = dto.content.trim();
     const chunks = this.chunk(content);
 
@@ -169,14 +185,14 @@ export class DocumentsService implements OnApplicationBootstrap {
     const doc = await this.db.transaction(async (client) => {
       // The unique index on content_hash settles races between concurrent uploads.
       const { rows } = await client.query<DocumentRow>(
-        `INSERT INTO documents (title, source, char_count, chunk_count, content_hash, embedding_model, content, owner_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `INSERT INTO documents (title, source, char_count, chunk_count, content_hash, embedding_model, content, owner_id, language)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT (owner_id, content_hash) DO NOTHING
          RETURNING ${SUMMARY_COLUMNS}`,
-        [title, dto.source ?? 'paste', content.length, chunks.length, hash, this.embeddingId, content, owner],
+        [title, dto.source ?? 'paste', content.length, chunks.length, hash, this.embeddingId, content, owner, language],
       );
       if (!rows[0]) return null;
-      await this.insertChunks(client, rows[0].id, chunks, vectors);
+      await this.insertChunks(client, rows[0].id, chunks, vectors, language);
       return rows[0];
     });
 
@@ -194,12 +210,13 @@ export class DocumentsService implements OnApplicationBootstrap {
    * Index an uploaded file: extract its text (throws ExtractionError for unreadable or unsupported
    * files), title it from its first heading or its file name, then index it like pasted text.
    */
-  async ingestFile(filename: string, buffer: Buffer, owner = DEFAULT_OWNER): Promise<DocumentSummary> {
+  async ingestFile(filename: string, buffer: Buffer, owner = DEFAULT_OWNER, language?: string): Promise<DocumentSummary> {
+    const resolved = this.resolveLanguage(language);
     const content = await extractText(filename, buffer);
     if (content.length > MAX_DOCUMENT_CHARS) throw new BadRequestException('File is too large');
     const ext = extname(filename).toLowerCase();
     const title = titleFrom(content, filename.slice(0, -ext.length) || filename);
-    return this.create({ title, content, source: filename }, owner);
+    return this.create({ title, content, source: filename, language: resolved }, owner);
   }
 
   /** Another user's document is reported as missing, not forbidden, so ids can't be probed. */
@@ -221,7 +238,12 @@ export class DocumentsService implements OnApplicationBootstrap {
    * Re-chunk and re-embed a document, replacing its chunks atomically so searches see either the
    * old version or the new one. Used for edits and for re-indexing with new settings or a new model.
    */
-  private async rebuild(current: DocumentRow, title: string, content: string): Promise<DocumentSummary> {
+  private async rebuild(
+    current: DocumentRow,
+    title: string,
+    content: string,
+    language = current.language,
+  ): Promise<DocumentSummary> {
     const chunks = this.chunk(content);
     const hash = hashContent(content);
     if (hash !== current.content_hash) {
@@ -237,14 +259,14 @@ export class DocumentsService implements OnApplicationBootstrap {
       updated = await this.db.transaction(async (client) => {
         const { rows } = await client.query<DocumentRow>(
           `UPDATE documents
-              SET title = $2, char_count = $3, chunk_count = $4, content_hash = $5, embedding_model = $6, content = $7
+              SET title = $2, char_count = $3, chunk_count = $4, content_hash = $5, embedding_model = $6, content = $7, language = $9
             WHERE id = $1 AND owner_id = $8
           RETURNING ${SUMMARY_COLUMNS}`,
-          [current.id, title, content.length, chunks.length, hash, this.embeddingId, content, current.owner_id ?? DEFAULT_OWNER],
+          [current.id, title, content.length, chunks.length, hash, this.embeddingId, content, current.owner_id ?? DEFAULT_OWNER, language],
         );
         if (!rows[0]) return undefined; // deleted while we were embedding
         await client.query('DELETE FROM chunks WHERE document_id = $1', [current.id]);
-        await this.insertChunks(client, current.id, chunks, vectors);
+        await this.insertChunks(client, current.id, chunks, vectors, language);
         return rows[0];
       });
     } catch (err) {
@@ -262,13 +284,14 @@ export class DocumentsService implements OnApplicationBootstrap {
 
   /** Change a document's title and/or text; either way it is re-embedded, as the title is part of what is embedded. */
   async update(id: string, dto: UpdateDocumentDto, owner = DEFAULT_OWNER): Promise<DocumentSummary> {
-    if (dto.title === undefined && dto.content === undefined) {
-      throw new BadRequestException('Send a new title, new content, or both');
+    if (dto.title === undefined && dto.content === undefined && dto.language === undefined) {
+      throw new BadRequestException('Send a new title, new content, a new language, or any of them');
     }
+    const language = dto.language !== undefined ? this.resolveLanguage(dto.language) : undefined;
     const current = await this.getRow(id, owner);
     const content = dto.content !== undefined ? dto.content.trim() : current.content;
     if (content == null) throw new ConflictException(NO_SOURCE_TEXT);
-    return this.rebuild(current, dto.title?.trim() ?? current.title, content);
+    return this.rebuild(current, dto.title?.trim() ?? current.title, content, language);
   }
 
   /** Re-index one document from its stored text with the current chunking settings and embedding model. */
