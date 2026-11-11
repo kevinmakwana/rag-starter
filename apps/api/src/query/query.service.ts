@@ -127,7 +127,11 @@ export class QueryService {
     return approximate.length >= limit ? approximate : run(exactOrder);
   }
 
-  /** Chunks containing any word of the question, best full-text match first. Scores are still cosine. */
+  /**
+   * Chunks containing any word of the question, best full-text match first. Each document is searched with
+   * its own language's configuration, so the languages present are looked up first (this user's documents,
+   * within `documentIds` if given) and each gets a query of its own. Scores are still cosine.
+   */
   private async lexicalSearch(
     vector: string,
     question: string,
@@ -137,29 +141,54 @@ export class QueryService {
   ): Promise<RetrievedChunk[]> {
     const tsquery = toOrTsQuery(question);
     if (!tsquery) return [];
-    const params: unknown[] = [vector, limit, owner, tsquery];
-    let filter = '';
+
+    const scope: unknown[] = [owner];
+    let docFilter = '';
     if (documentIds?.length) {
-      params.push(documentIds);
-      filter = 'AND c.document_id = ANY($5::uuid[])';
+      scope.push(documentIds);
+      docFilter = 'AND id = ANY($2::uuid[])';
     }
-    const { rows } = await this.db.query<RetrievedChunk>(
-      `SELECT c.id::text            AS "chunkId",
-              c.document_id         AS "documentId",
-              d.title,
-              c.heading,
-              c.content,
-              1 - (c.embedding <=> $1::vector) AS score
-         FROM chunks c
-         JOIN documents d ON d.id = c.document_id
-        WHERE d.owner_id = $3
-          AND c.fts @@ to_tsquery('english', $4)
-          ${filter}
-        ORDER BY ts_rank_cd(c.fts, to_tsquery('english', $4)) DESC, c.id
-        LIMIT $2`,
-      params,
+    const { rows: languages } = await this.db.query<{ language: string }>(
+      `SELECT DISTINCT language FROM documents WHERE owner_id = $1 ${docFilter}`,
+      scope,
     );
-    return rows.map((r) => ({ ...r, score: Number(r.score) }));
+
+    const perLanguage = await Promise.all(
+      languages.map(async ({ language }) => {
+        const params: unknown[] = [vector, limit, owner, tsquery, language];
+        let filter = '';
+        if (documentIds?.length) {
+          params.push(documentIds);
+          filter = 'AND c.document_id = ANY($6::uuid[])';
+        }
+        const { rows } = await this.db.query<RetrievedChunk & { rank: number }>(
+          `SELECT c.id::text            AS "chunkId",
+                  c.document_id         AS "documentId",
+                  d.title,
+                  c.heading,
+                  c.content,
+                  1 - (c.embedding <=> $1::vector) AS score,
+                  ts_rank_cd(c.fts, to_tsquery($5::regconfig, $4)) AS rank
+             FROM chunks c
+             JOIN documents d ON d.id = c.document_id
+            WHERE d.owner_id = $3
+              AND c.language = $5::regconfig
+              AND c.fts @@ to_tsquery($5::regconfig, $4)
+              ${filter}
+            ORDER BY rank DESC, c.id
+            LIMIT $2`,
+          params,
+        );
+        return rows;
+      }),
+    );
+
+    // Ranks from different configurations are comparable enough to interleave; ties keep a stable order.
+    return perLanguage
+      .flat()
+      .sort((a, b) => Number(b.rank) - Number(a.rank) || Number(a.chunkId) - Number(b.chunkId))
+      .slice(0, limit)
+      .map(({ rank: _rank, ...chunk }) => ({ ...chunk, score: Number(chunk.score) }));
   }
 
   /**

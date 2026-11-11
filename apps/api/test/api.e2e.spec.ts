@@ -12,7 +12,7 @@ import { AddressInfo } from 'net';
 import { join, resolve } from 'path';
 import { Client, Pool } from 'pg';
 import { APP_CONFIG, AppConfig } from '../src/config';
-import { DatabaseService } from '../src/database/database.service';
+import { DatabaseService, toVector } from '../src/database/database.service';
 import { Migration, runMigrations } from '../src/database/migrator';
 import { migrations } from '../src/database/migrations';
 import { titleFrom } from '../src/documents/documents.dto';
@@ -1479,5 +1479,96 @@ describeIfDb('document language (e2e)', () => {
     const created = (await readJson(await fetch(`${base}/documents`))).find((d: any) => d.title === 'Job default');
     expect(created.language).toBe('english');
     await remove(created.id);
+  });
+});
+
+describeIfDb('multilingual keyword search (e2e)', () => {
+  let app: INestApplication;
+
+  beforeAll(async () => {
+    Object.assign(process.env, {
+      DATABASE_URL: DB,
+      EMBEDDING_PROVIDER: 'mock',
+      CHAT_PROVIDER: 'mock',
+      EMBEDDING_DIM: '256',
+      API_KEYS: '',
+      DEMO_MODE: '',
+      FTS_LANGUAGE: '',
+    });
+    const { AppModule } = await import('../src/app.module');
+    app = await NestFactory.create<NestExpressApplication>(AppModule, { logger: false });
+    await app.init();
+  });
+  afterAll(async () => {
+    await app?.close();
+  });
+
+  const ids: string[] = [];
+  const add = async (title: string, content: string, language: string, owner = 'default') => {
+    const doc = await app.get(DocumentsService).create({ title, content, language }, owner);
+    ids.push(doc.id);
+    return doc;
+  };
+  afterEach(async () => {
+    await Promise.all(ids.splice(0).map((id) => app.get(DatabaseService).query('DELETE FROM documents WHERE id = $1', [id])));
+  });
+
+  /** The keyword half only: the mock embeddings are bag-of-words, so a vector match could hide a keyword miss. */
+  const lexical = async (question: string, owner = 'default', documentIds?: string[]) => {
+    const [embedding] = await app.get<EmbeddingProvider>(EMBEDDING_PROVIDER).embed([question]);
+    const rows = await (app.get(QueryService) as any).lexicalSearch(toVector(embedding), question, 20, owner, documentIds);
+    return (rows as { title: string }[]).map((r) => r.title);
+  };
+
+  const DE = 'Die Rechnungen werden jährlich bezahlt. Kündigungen sind monatlich möglich.';
+
+  it('finds a German document by an inflected word only when it is indexed as german', async () => {
+    await add('DE as german', DE, 'german');
+    await add('DE as english', `${DE} Anderer Text.`, 'english');
+    // Index side: German stems "Rechnungen" to "rechnung"; indexed as English it stays "rechnungen".
+    expect(await lexical('Rechnung')).toEqual(['DE as german']);
+  });
+
+  it('stems the question with the language of each document it searches', async () => {
+    await add('DE as german', DE, 'german');
+    await add('DE as english', `${DE} Anderer Text.`, 'english');
+    // Query side: "Rechnungen" is "rechnung" for the German document and stays "rechnungen" for the English one;
+    // a single fixed configuration would find only one of the two.
+    expect((await lexical('Rechnungen')).sort()).toEqual(['DE as english', 'DE as german']);
+  });
+
+  it('searches a mixed corpus in one question, each document with its own language', async () => {
+    await add('DE', DE, 'german');
+    await add('EN', 'The invoices are paid yearly and cancellations are monthly.', 'english');
+    await add('FR', 'Les factures sont payées chaque année.', 'french');
+    expect((await lexical('Rechnung invoice facture')).sort()).toEqual(['DE', 'EN', 'FR']);
+  });
+
+  it('keeps the search inside the given documents', async () => {
+    const de = await add('DE', DE, 'german');
+    await add('EN', 'The invoices are paid yearly.', 'english');
+    expect(await lexical('Rechnung invoice', 'default', [de.id])).toEqual(['DE']);
+  });
+
+  it("does not look at another user's documents or languages", async () => {
+    await add('Bob DE', DE, 'german', 'bob');
+    await add('Alice EN', 'The invoices are paid yearly.', 'english', 'alice');
+    expect(await lexical('Rechnung invoice', 'alice')).toEqual(['Alice EN']);
+    expect(await lexical('Rechnung invoice', 'bob')).toEqual(['Bob DE']);
+  });
+
+  it('returns nothing, rather than failing, for a question of only stop words in the document language', async () => {
+    await add('DE', DE, 'german');
+    expect(await lexical('die der das')).toEqual([]);
+  });
+
+  it('copes with apostrophes, accents and punctuation in the question', async () => {
+    await add('FR', 'Les étés sont chauds. Les factures sont payées.', 'french');
+    // "été" is itself a French stop word; the content word is "factures". Everything else is punctuation to survive.
+    expect(await lexical("l'été, c'est ça? (les factures) & | ! :")).toEqual(['FR']);
+  });
+
+  it('still answers a question when no document matches', async () => {
+    expect(await lexical('zzzzqqqq')).toEqual([]);
   });
 });
