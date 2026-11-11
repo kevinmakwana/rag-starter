@@ -1,4 +1,5 @@
 import { Migration, validateMigrations } from '../src/database/migrator';
+import { migrations } from '../src/database/migrations';
 
 const m = (id: number, name: string): Migration => ({ id, name, up: async () => undefined });
 
@@ -19,4 +20,9 @@ describe('validateMigrations', () => {
     expect(() => validateMigrations([m(1, '')])).toThrow(/name/);
     expect(() => validateMigrations([m(1, 'a'), m(2, 'a')])).toThrow(/same name/);
   });
+});
+
+it('the real migration list is valid and starts with the baseline', () => {
+  expect(() => validateMigrations(migrations)).not.toThrow();
+  expect(migrations[0]).toMatchObject({ id: 1, name: 'baseline' });
 });

@@ -12,7 +12,9 @@ import { AddressInfo } from 'net';
 import { join, resolve } from 'path';
 import { Client, Pool } from 'pg';
 import { APP_CONFIG, AppConfig } from '../src/config';
+import { DatabaseService } from '../src/database/database.service';
 import { Migration, runMigrations } from '../src/database/migrator';
+import { migrations } from '../src/database/migrations';
 import { titleFrom } from '../src/documents/documents.dto';
 import { DocumentsService } from '../src/documents/documents.service';
 import { evaluate, evaluateAnswers } from '../src/eval/evaluate';
@@ -1180,5 +1182,115 @@ describeIfDb('migration runner (e2e)', () => {
     const broken = create(1, 'broken', 'SELECT 1/0');
     await expect(runMigrations(scratch.pool, [broken], ctx)).rejects.toThrow();
     await expect(runMigrations(scratch.pool, [create(1, 'broken', 'SELECT 1')], ctx)).resolves.toHaveLength(1);
+  });
+});
+
+describeIfDb('schema migrations on real schemas (e2e)', () => {
+  let scratch: Awaited<ReturnType<typeof scratchSchema>>;
+  beforeEach(async () => {
+    scratch = await scratchSchema();
+  });
+  afterEach(async () => {
+    await scratch.drop();
+  });
+  const ctx = { embeddingDim: 8 };
+  const indexes = async () =>
+    (await scratch.pool.query('SELECT indexname FROM pg_indexes WHERE schemaname = $1', [scratch.schema])).rows.map(
+      (r) => r.indexname as string,
+    );
+  const columns = async (table: string) =>
+    (
+      await scratch.pool.query(
+        'SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2',
+        [scratch.schema, table],
+      )
+    ).rows.map((r) => r.column_name as string);
+
+  it('builds the whole current schema on an empty database and records version 1', async () => {
+    await runMigrations(scratch.pool, migrations, ctx);
+    expect(await columns('documents')).toEqual(
+      expect.arrayContaining(['id', 'title', 'source', 'char_count', 'chunk_count', 'created_at', 'content_hash', 'content', 'embedding_model', 'owner_id']),
+    );
+    expect(await columns('chunks')).toEqual(expect.arrayContaining(['id', 'document_id', 'ordinal', 'heading', 'content', 'embedding', 'fts']));
+    expect(await columns('ingestion_jobs')).toEqual(
+      expect.arrayContaining(['id', 'kind', 'status', 'title', 'payload', 'file', 'owner_id', 'result', 'error', 'progress_done', 'progress_total', 'created_at', 'started_at', 'finished_at']),
+    );
+    const idx = await indexes();
+    expect(idx).toEqual(
+      expect.arrayContaining(['documents_owner_hash_idx', 'ingestion_jobs_queue_idx', 'chunks_document_idx', 'chunks_fts_idx', 'chunks_embedding_idx']),
+    );
+    expect(idx).not.toContain('documents_content_hash_idx');
+    expect((await scratch.pool.query('SELECT id, name FROM schema_migrations')).rows).toEqual([{ id: 1, name: 'baseline' }]);
+  });
+
+  it('skips the HNSW index above 2000 dimensions, as before', async () => {
+    await runMigrations(scratch.pool, migrations, { embeddingDim: 2001 });
+    expect(await indexes()).not.toContain('chunks_embedding_idx');
+  });
+
+  it('adopts a database from the first release and keeps its rows', async () => {
+    const q = (sql: string, p: unknown[] = []) => scratch.pool.query(sql, p);
+    // The schema as the first release created it: no hash, text, model, owner, jobs table or fts column.
+    await q(`CREATE TABLE documents (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), title text NOT NULL, source text NOT NULL DEFAULT 'paste',
+      char_count integer NOT NULL, chunk_count integer NOT NULL DEFAULT 0, created_at timestamptz NOT NULL DEFAULT now())`);
+    await q(`CREATE TABLE chunks (
+      id bigserial PRIMARY KEY, document_id uuid NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+      ordinal integer NOT NULL, heading text, content text NOT NULL, embedding vector(8) NOT NULL)`);
+    const doc = await q("INSERT INTO documents (title, char_count, chunk_count) VALUES ('Old', 12, 1) RETURNING id");
+    await q("INSERT INTO chunks (document_id, ordinal, heading, content, embedding) VALUES ($1, 0, 'H', 'old words here', '[1,0,0,0,0,0,0,0]')", [doc.rows[0].id]);
+
+    await runMigrations(scratch.pool, migrations, ctx);
+
+    const kept = await q('SELECT title, owner_id, content_hash, content FROM documents');
+    expect(kept.rows).toEqual([{ title: 'Old', owner_id: 'default', content_hash: null, content: null }]);
+    const chunk = await q("SELECT count(*)::int AS n FROM chunks WHERE fts @@ plainto_tsquery('english', 'words')");
+    expect(chunk.rows[0].n).toBe(1);
+    expect((await q('SELECT id FROM schema_migrations')).rows).toEqual([{ id: 1 }]);
+  });
+
+  it('adopts a database that already has the current schema but no tracking table', async () => {
+    await runMigrations(scratch.pool, migrations, ctx);
+    await scratch.pool.query("INSERT INTO documents (title, char_count, content_hash) VALUES ('Kept', 5, 'h1')");
+    await scratch.pool.query('DROP TABLE schema_migrations'); // what a database from before this change looks like
+
+    await expect(runMigrations(scratch.pool, migrations, ctx)).resolves.toHaveLength(1);
+
+    expect((await scratch.pool.query('SELECT title FROM documents')).rows).toEqual([{ title: 'Kept' }]);
+    expect((await scratch.pool.query('SELECT id FROM schema_migrations')).rows).toEqual([{ id: 1 }]);
+  });
+});
+
+describeIfDb('DatabaseService startup (e2e)', () => {
+  let scratch: Awaited<ReturnType<typeof scratchSchema>>;
+  beforeEach(async () => {
+    scratch = await scratchSchema();
+  });
+  afterEach(async () => {
+    await scratch.drop();
+  });
+  const service = (embeddingDim: number) => {
+    const url = new URL(DB!);
+    url.searchParams.set('options', `-c search_path=${scratch.schema},public`);
+    return new DatabaseService({ databaseUrl: url.toString(), embeddingDim } as AppConfig);
+  };
+
+  it('migrates on start and starts again without error', async () => {
+    const first = service(8);
+    await first.onModuleInit();
+    await first.onModuleDestroy();
+    const second = service(8);
+    await second.onModuleInit();
+    expect((await second.query('SELECT id FROM schema_migrations')).rows).toEqual([{ id: 1 }]);
+    await second.onModuleDestroy();
+  });
+
+  it('refuses to start when EMBEDDING_DIM differs from the chunks table, and says how to change it', async () => {
+    const first = service(8);
+    await first.onModuleInit();
+    await first.onModuleDestroy();
+    const other = service(16);
+    await expect(other.onModuleInit()).rejects.toThrow(/8 dimensions but EMBEDDING_DIM=16.*README/s);
+    await other.onModuleDestroy();
   });
 });
