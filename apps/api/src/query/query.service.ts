@@ -168,12 +168,12 @@ export class QueryService {
                   c.heading,
                   c.content,
                   1 - (c.embedding <=> $1::vector) AS score,
-                  ts_rank_cd(c.fts, to_tsquery($5::regconfig, $4)) AS rank
+                  ts_rank_cd(c.fts, to_tsquery($5::text::regconfig, $4)) AS rank
              FROM chunks c
              JOIN documents d ON d.id = c.document_id
             WHERE d.owner_id = $3
-              AND c.language = $5::regconfig
-              AND c.fts @@ to_tsquery($5::regconfig, $4)
+              AND c.language = $5::text
+              AND c.fts @@ to_tsquery($5::text::regconfig, $4)
               ${filter}
             ORDER BY rank DESC, c.id
             LIMIT $2`,

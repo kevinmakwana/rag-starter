@@ -1228,6 +1228,20 @@ describeIfDb('schema migrations on real schemas (e2e)', () => {
     expect(await columns('chunks')).toContain('language');
   });
 
+  it('uses no regconfig column, which would stop pg_upgrade from moving the database to a new major version', async () => {
+    await runMigrations(scratch.pool, migrations, ctx);
+    const { rows } = await scratch.pool.query(
+      `SELECT c.relname || '.' || a.attname AS col
+         FROM pg_attribute a
+         JOIN pg_class c ON c.oid = a.attrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = $1 AND a.attnum > 0 AND NOT a.attisdropped
+          AND a.atttypid IN ('regconfig'::regtype, 'regclass'::regtype, 'regproc'::regtype, 'regdictionary'::regtype)`,
+      [scratch.schema],
+    );
+    expect(rows).toEqual([]);
+  });
+
   it('skips the HNSW index above 2000 dimensions, as before', async () => {
     await runMigrations(scratch.pool, migrations, { embeddingDim: 2001 });
     expect(await indexes()).not.toContain('chunks_embedding_idx');
@@ -1269,7 +1283,7 @@ describeIfDb('schema migrations on real schemas (e2e)', () => {
     // New chunks are indexed with their own language: German stems "Rechnungen" to "rechnung", English does not.
     const text = 'Die Rechnungen werden jährlich bezahlt';
     const insert = (language: string) =>
-      q("INSERT INTO chunks (document_id, ordinal, content, embedding, language) VALUES ($1, 1, $2, '[0,1,0,0,0,0,0,0]', $3::regconfig)", [doc.rows[0].id, text, language]);
+      q("INSERT INTO chunks (document_id, ordinal, content, embedding, language) VALUES ($1, 1, $2, '[0,1,0,0,0,0,0,0]', $3)", [doc.rows[0].id, text, language]);
     await insert('german');
     await insert('english');
     const hits = await q(
@@ -1566,6 +1580,11 @@ describeIfDb('multilingual keyword search (e2e)', () => {
     await add('FR', 'Les étés sont chauds. Les factures sont payées.', 'french');
     // "été" is itself a French stop word; the content word is "factures". Everything else is punctuation to survive.
     expect(await lexical("l'été, c'est ça? (les factures) & | ! :")).toEqual(['FR']);
+  });
+
+  it('finds a Hindi document, whose words contain combining vowel signs', async () => {
+    await add('HI', 'हिन्दी भाषा की पुस्तक', 'hindi');
+    expect(await lexical('हिन्दी')).toEqual(['HI']);
   });
 
   it('still answers a question when no document matches', async () => {

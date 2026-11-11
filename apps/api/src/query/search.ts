@@ -1,8 +1,9 @@
 /** Turn free text into a tsquery that matches passages containing ANY of its words. */
 export function toOrTsQuery(text: string): string {
   return text
+    .normalize('NFC') // a question typed with combining accents must match text stored precomposed
     .toLowerCase()
-    .split(/[^\p{L}\p{N}]+/u)
+    .split(/[^\p{L}\p{M}\p{N}]+/u) // \p{M}: vowel signs and viramas belong to their word (Hindi, Tamil, Thai, ...)
     .filter(Boolean)
     .join(' | ');
 }

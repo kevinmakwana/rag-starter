@@ -103,6 +103,8 @@ The daily cap bounds how many questions are answered, but the only hard limit on
 
 The API applies any pending schema migrations when it starts and records them in the `schema_migrations` table, so an update needs no extra step. Take a backup (above) before every update: migrations only go forward, and going back means restoring that backup. From this version on, an older image started against a newer database refuses to start and says so (an image from before migrations existed does not check, and could fail later on a changed table); update the image rather than editing `schema_migrations`. Starting several API containers at once is safe, they take turns.
 
+The migration that added document languages (`document_language`) regenerates the full-text column, which rewrites the `chunks` table and rebuilds every index on it, the vector index included, while the table is locked. A small corpus takes seconds; on a large one (hundreds of thousands of chunks) the first start of this version can take minutes or longer and needs free disk of about twice the size of `chunks` and its indexes. Take a backup first, give that first start a generous health-check and restart timeout so an orchestrator does not kill it half way (a killed migration rolls back and starts again), and do it when the demo can be offline.
+
 ### Changing the database password
 
 `POSTGRES_PASSWORD` only takes effect when the database volume is first created. If you already started the stack and want a different password, change it in the database first, then in `.env`:

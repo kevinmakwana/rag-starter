@@ -147,7 +147,7 @@ export class DocumentsService implements OnApplicationBootstrap {
   private async insertChunks(client: PoolClient, documentId: string, chunks: Chunk[], vectors: number[][], language: string) {
     await client.query(
       `INSERT INTO chunks (document_id, ordinal, heading, content, embedding, language)
-       SELECT $1, t.ordinal, t.heading, t.content, t.embedding::vector, $6::regconfig
+       SELECT $1, t.ordinal, t.heading, t.content, t.embedding::vector, $6
          FROM unnest($2::int[], $3::text[], $4::text[], $5::text[]) AS t(ordinal, heading, content, embedding)`,
       [
         documentId,

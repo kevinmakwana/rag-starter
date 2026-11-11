@@ -13,6 +13,15 @@ describe('toOrTsQuery', () => {
     expect(toOrTsQuery("it's (AES-256) & TLS 1.2: ok!")).toBe("it | s | aes | 256 | tls | 1 | 2 | ok");
   });
 
+  it('keeps combining marks, so words in Indic scripts are not torn apart', () => {
+    expect(toOrTsQuery('हिन्दी भाषा')).toBe('हिन्दी | भाषा');
+    expect(toOrTsQuery('தமிழ் மொழி')).toBe('தமிழ் | மொழி');
+  });
+
+  it('composes accents, so a question typed with combining accents matches the stored text', () => {
+    expect(toOrTsQuery('cafe\u0301 creme')).toBe('caf\u00e9 | creme');
+  });
+
   it('returns an empty string when there is nothing searchable', () => {
     expect(toOrTsQuery('?! ...')).toBe('');
   });
