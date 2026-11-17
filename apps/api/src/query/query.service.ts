@@ -4,6 +4,7 @@ import { APP_CONFIG, AppConfig } from '../config';
 import { DatabaseService, toVector } from '../database/database.service';
 import { annotateQuery } from '../observability/request-context';
 import { CHAT_PROVIDER, ChatProvider, EMBEDDING_PROVIDER, EmbeddingProvider } from '../providers/types';
+import { DocumentFilter, documentFilterSql } from './document-filter';
 import {
   buildMessages,
   buildRewriteMessages,
@@ -95,14 +96,11 @@ export class QueryService {
     vector: string,
     limit: number,
     owner: string,
-    documentIds?: string[],
+    documentFilter?: DocumentFilter,
   ): Promise<RetrievedChunk[]> {
-    const params: unknown[] = [vector, limit, owner];
-    let filter = 'WHERE d.owner_id = $3';
-    if (documentIds?.length) {
-      params.push(documentIds);
-      filter += ' AND c.document_id = ANY($4::uuid[])';
-    }
+    const scope = documentFilterSql(documentFilter, 'd', 4);
+    const params: unknown[] = [vector, limit, owner, ...scope.params];
+    const filter = `WHERE d.owner_id = $3${scope.sql}`;
     const run = async (orderBy: string): Promise<RetrievedChunk[]> => {
       const { rows } = await this.db.query<RetrievedChunk>(
         `SELECT c.id::text            AS "chunkId",
@@ -130,37 +128,28 @@ export class QueryService {
   /**
    * Chunks containing any word of the question, best full-text match first. Each document is searched with
    * its own language's configuration, so the languages present are looked up first (this user's documents,
-   * within `documentIds` if given) and each gets a query of its own. Scores are still cosine.
+   * within the filter if given) and each gets a query of its own. Scores are still cosine.
    */
   private async lexicalSearch(
     vector: string,
     question: string,
     limit: number,
     owner: string,
-    documentIds?: string[],
+    documentFilter?: DocumentFilter,
   ): Promise<RetrievedChunk[]> {
     const tsquery = toOrTsQuery(question);
     if (!tsquery) return [];
 
-    const scope: unknown[] = [owner];
-    let docFilter = '';
-    if (documentIds?.length) {
-      scope.push(documentIds);
-      docFilter = 'AND id = ANY($2::uuid[])';
-    }
+    const scope = documentFilterSql(documentFilter, 'd', 2);
     const { rows: languages } = await this.db.query<{ language: string }>(
-      `SELECT DISTINCT language FROM documents WHERE owner_id = $1 ${docFilter}`,
-      scope,
+      `SELECT DISTINCT d.language FROM documents d WHERE d.owner_id = $1${scope.sql}`,
+      [owner, ...scope.params],
     );
 
     const perLanguage = await Promise.all(
       languages.map(async ({ language }) => {
-        const params: unknown[] = [vector, limit, owner, tsquery, language];
-        let filter = '';
-        if (documentIds?.length) {
-          params.push(documentIds);
-          filter = 'AND c.document_id = ANY($6::uuid[])';
-        }
+        const inLanguage = documentFilterSql(documentFilter, 'd', 6);
+        const params: unknown[] = [vector, limit, owner, tsquery, language, ...inLanguage.params];
         const { rows } = await this.db.query<RetrievedChunk & { rank: number }>(
           `SELECT c.id::text            AS "chunkId",
                   c.document_id         AS "documentId",
@@ -173,8 +162,7 @@ export class QueryService {
              JOIN documents d ON d.id = c.document_id
             WHERE d.owner_id = $3
               AND c.language = $5::text
-              AND c.fts @@ to_tsquery($5::text::regconfig, $4)
-              ${filter}
+              AND c.fts @@ to_tsquery($5::text::regconfig, $4)${inLanguage.sql}
             ORDER BY rank DESC, c.id
             LIMIT $2`,
           params,
@@ -200,7 +188,7 @@ export class QueryService {
   async retrieve(
     question: string,
     topK: number,
-    documentIds?: string[],
+    filter?: DocumentFilter,
     owner = DEFAULT_OWNER,
   ): Promise<RetrievedChunk[]> {
     const [embedding] = await this.embeddings.embed([question]);
@@ -212,12 +200,12 @@ export class QueryService {
     if (this.cfg.searchMode === 'hybrid') {
       const fetchLimit = Math.max(pool * 4, 20);
       const [semantic, lexical] = await Promise.all([
-        this.vectorSearch(vector, fetchLimit, owner, documentIds),
-        this.lexicalSearch(vector, question, fetchLimit, owner, documentIds),
+        this.vectorSearch(vector, fetchLimit, owner, filter),
+        this.lexicalSearch(vector, question, fetchLimit, owner, filter),
       ]);
       ranked = reciprocalRankFusion([semantic, lexical]).map((f) => f.item);
     } else {
-      ranked = await this.vectorSearch(vector, pool, owner, documentIds);
+      ranked = await this.vectorSearch(vector, pool, owner, filter);
     }
     const candidates = ranked.filter((r) => r.score >= this.cfg.minScore).slice(0, pool);
     return (await this.reranker.rerank(question, candidates)).slice(0, topK);
@@ -288,24 +276,24 @@ export class QueryService {
   async ask(
     question: string,
     topK = this.cfg.topK,
-    documentIds?: string[],
+    filter?: DocumentFilter,
     history?: HistoryMessage[],
     owner = DEFAULT_OWNER,
   ): Promise<QueryResult> {
-    return (await this.askWithPassages(question, topK, documentIds, history, owner)).result;
+    return (await this.askWithPassages(question, topK, filter, history, owner)).result;
   }
 
   /** `ask`, also returning the full retrieved passages (sources only carry a 320-character snippet). */
   async askWithPassages(
     question: string,
     topK = this.cfg.topK,
-    documentIds?: string[],
+    filter?: DocumentFilter,
     history?: HistoryMessage[],
     owner = DEFAULT_OWNER,
   ): Promise<AnsweredQuestion> {
     const started = Date.now();
     const searchQuestion = await this.standalone(question, history);
-    const chunks = await this.timed('retrieveMs', () => this.retrieve(searchQuestion, topK, documentIds, owner));
+    const chunks = await this.timed('retrieveMs', () => this.retrieve(searchQuestion, topK, filter, owner));
 
     const answer = chunks.length
       ? await this.timed('answerMs', () => this.chat.complete(buildMessages(searchQuestion, chunks)))
@@ -324,14 +312,14 @@ export class QueryService {
   async *askStream(
     question: string,
     topK = this.cfg.topK,
-    documentIds?: string[],
+    filter?: DocumentFilter,
     signal?: AbortSignal,
     history?: HistoryMessage[],
     owner = DEFAULT_OWNER,
   ): AsyncGenerator<QueryStreamEvent> {
     const started = Date.now();
     const searchQuestion = await this.standalone(question, history);
-    const chunks = await this.timed('retrieveMs', () => this.retrieve(searchQuestion, topK, documentIds, owner));
+    const chunks = await this.timed('retrieveMs', () => this.retrieve(searchQuestion, topK, filter, owner));
     yield { type: 'sources', sources: this.toSources(chunks) };
 
     let answer = '';

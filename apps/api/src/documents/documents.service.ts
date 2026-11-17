@@ -16,6 +16,7 @@ import { DatabaseService, toVector } from '../database/database.service';
 import { Chunk, chunkText, embeddingText } from '../ingestion/chunker';
 import { extractText } from '../ingestion/extractors';
 import { EMBEDDING_PROVIDER, EmbeddingProvider } from '../providers/types';
+import { normalizeTags } from './tags';
 import {
   CreateDocumentDto,
   DocumentDetail,
@@ -33,13 +34,14 @@ interface DocumentRow {
   chunk_count: number;
   created_at: Date;
   language: string;
+  tags: string[];
   /** Only selected where needed: the full text can be large. NULL for documents indexed before it was stored. */
   content?: string | null;
   content_hash?: string | null;
   owner_id?: string;
 }
 
-const SUMMARY_COLUMNS = 'id, title, source, char_count, chunk_count, created_at, language';
+const SUMMARY_COLUMNS = 'id, title, source, char_count, chunk_count, created_at, language, tags';
 const NO_SOURCE_TEXT =
   'This document was indexed before its source text was stored, so there is nothing to re-index from. ' +
   'Upload it again (or send the new text with this request).';
@@ -64,6 +66,7 @@ const toSummary = (r: DocumentRow, duplicate = false): DocumentSummary => ({
   chunkCount: r.chunk_count,
   createdAt: r.created_at.toISOString(),
   language: r.language,
+  tags: r.tags ?? [],
   duplicate,
 });
 
@@ -162,6 +165,7 @@ export class DocumentsService implements OnApplicationBootstrap {
 
   /** Index a document. Content that is already indexed returns the existing one (`duplicate: true`). */
   async create(dto: CreateDocumentDto, owner = DEFAULT_OWNER): Promise<DocumentSummary> {
+    const tags = normalizeTags(dto.tags);
     const language = this.resolveLanguage(dto.language);
     const content = dto.content.trim();
     const chunks = this.chunk(content);
@@ -185,11 +189,11 @@ export class DocumentsService implements OnApplicationBootstrap {
     const doc = await this.db.transaction(async (client) => {
       // The unique index on content_hash settles races between concurrent uploads.
       const { rows } = await client.query<DocumentRow>(
-        `INSERT INTO documents (title, source, char_count, chunk_count, content_hash, embedding_model, content, owner_id, language)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        `INSERT INTO documents (title, source, char_count, chunk_count, content_hash, embedding_model, content, owner_id, language, tags)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          ON CONFLICT (owner_id, content_hash) DO NOTHING
          RETURNING ${SUMMARY_COLUMNS}`,
-        [title, dto.source ?? 'paste', content.length, chunks.length, hash, this.embeddingId, content, owner, language],
+        [title, dto.source ?? 'paste', content.length, chunks.length, hash, this.embeddingId, content, owner, language, tags],
       );
       if (!rows[0]) return null;
       await this.insertChunks(client, rows[0].id, chunks, vectors, language);
@@ -210,13 +214,20 @@ export class DocumentsService implements OnApplicationBootstrap {
    * Index an uploaded file: extract its text (throws ExtractionError for unreadable or unsupported
    * files), title it from its first heading or its file name, then index it like pasted text.
    */
-  async ingestFile(filename: string, buffer: Buffer, owner = DEFAULT_OWNER, language?: string): Promise<DocumentSummary> {
+  async ingestFile(
+    filename: string,
+    buffer: Buffer,
+    owner = DEFAULT_OWNER,
+    language?: string,
+    tags?: unknown,
+  ): Promise<DocumentSummary> {
     const resolved = this.resolveLanguage(language);
+    const normalizedTags = normalizeTags(tags);
     const content = await extractText(filename, buffer);
     if (content.length > MAX_DOCUMENT_CHARS) throw new BadRequestException('File is too large');
     const ext = extname(filename).toLowerCase();
     const title = titleFrom(content, filename.slice(0, -ext.length) || filename);
-    return this.create({ title, content, source: filename, language: resolved }, owner);
+    return this.create({ title, content, source: filename, language: resolved, tags: normalizedTags }, owner);
   }
 
   /** Another user's document is reported as missing, not forbidden, so ids can't be probed. */
@@ -243,6 +254,7 @@ export class DocumentsService implements OnApplicationBootstrap {
     title: string,
     content: string,
     language = current.language,
+    tags?: string[],
   ): Promise<DocumentSummary> {
     const chunks = this.chunk(content);
     const hash = hashContent(content);
@@ -259,10 +271,11 @@ export class DocumentsService implements OnApplicationBootstrap {
       updated = await this.db.transaction(async (client) => {
         const { rows } = await client.query<DocumentRow>(
           `UPDATE documents
-              SET title = $2, char_count = $3, chunk_count = $4, content_hash = $5, embedding_model = $6, content = $7, language = $9
+              SET title = $2, char_count = $3, chunk_count = $4, content_hash = $5, embedding_model = $6, content = $7, language = $9,
+                  tags = COALESCE($10::text[], tags)
             WHERE id = $1 AND owner_id = $8
           RETURNING ${SUMMARY_COLUMNS}`,
-          [current.id, title, content.length, chunks.length, hash, this.embeddingId, content, current.owner_id ?? DEFAULT_OWNER, language],
+          [current.id, title, content.length, chunks.length, hash, this.embeddingId, content, current.owner_id ?? DEFAULT_OWNER, language, tags ?? null],
         );
         if (!rows[0]) return undefined; // deleted while we were embedding
         await client.query('DELETE FROM chunks WHERE document_id = $1', [current.id]);
@@ -284,14 +297,24 @@ export class DocumentsService implements OnApplicationBootstrap {
 
   /** Change a document's title and/or text; either way it is re-embedded, as the title is part of what is embedded. */
   async update(id: string, dto: UpdateDocumentDto, owner = DEFAULT_OWNER): Promise<DocumentSummary> {
-    if (dto.title === undefined && dto.content === undefined && dto.language === undefined) {
-      throw new BadRequestException('Send a new title, new content, a new language, or any of them');
+    if (dto.title === undefined && dto.content === undefined && dto.language === undefined && dto.tags == null) {
+      throw new BadRequestException('Send a new title, new content, a new language, new tags, or any of them');
     }
     const language = dto.language !== undefined ? this.resolveLanguage(dto.language) : undefined;
+    const tags = dto.tags != null ? normalizeTags(dto.tags) : undefined;
+    if (dto.title === undefined && dto.content === undefined && language === undefined) {
+      // Only the labels change: they are not part of what is embedded, so nothing is re-indexed.
+      const { rows } = await this.db.query<DocumentRow>(
+        `UPDATE documents SET tags = $3 WHERE id = $1 AND owner_id = $2 RETURNING ${SUMMARY_COLUMNS}`,
+        [id, owner, tags],
+      );
+      if (!rows[0]) throw new NotFoundException(`Document ${id} not found`);
+      return toSummary(rows[0]);
+    }
     const current = await this.getRow(id, owner);
     const content = dto.content !== undefined ? dto.content.trim() : current.content;
     if (content == null) throw new ConflictException(NO_SOURCE_TEXT);
-    return this.rebuild(current, dto.title?.trim() ?? current.title, content, language);
+    return this.rebuild(current, dto.title?.trim() ?? current.title, content, language, tags);
   }
 
   /** Re-index one document from its stored text with the current chunking settings and embedding model. */
@@ -334,12 +357,33 @@ export class DocumentsService implements OnApplicationBootstrap {
     return report;
   }
 
-  async list(owner = DEFAULT_OWNER): Promise<DocumentSummary[]> {
+  /** The caller's documents, newest first; optionally only those with any of `tags` and/or exactly this `source`. */
+  async list(owner = DEFAULT_OWNER, filter: { tags?: string[]; source?: string } = {}): Promise<DocumentSummary[]> {
+    const params: unknown[] = [owner];
+    let where = 'owner_id = $1';
+    if (filter.tags?.length) {
+      params.push(filter.tags);
+      where += ` AND tags && $${params.length}::text[]`;
+    }
+    if (filter.source) {
+      params.push(filter.source);
+      where += ` AND source = $${params.length}`;
+    }
     const { rows } = await this.db.query<DocumentRow>(
-      `SELECT ${SUMMARY_COLUMNS} FROM documents WHERE owner_id = $1 ORDER BY created_at DESC`,
-      [owner],
+      `SELECT ${SUMMARY_COLUMNS} FROM documents WHERE ${where} ORDER BY created_at DESC`,
+      params,
     );
     return rows.map((r) => toSummary(r));
+  }
+
+  /** Every tag the caller has used, with how many of their documents carry it, most used first. */
+  async listTags(owner = DEFAULT_OWNER): Promise<{ tag: string; count: number }[]> {
+    const { rows } = await this.db.query<{ tag: string; count: number }>(
+      `SELECT t AS tag, count(*)::int AS count FROM documents d, unnest(d.tags) AS t
+        WHERE d.owner_id = $1 GROUP BY t ORDER BY count DESC, t`,
+      [owner],
+    );
+    return rows;
   }
 
   async remove(id: string, owner = DEFAULT_OWNER): Promise<void> {

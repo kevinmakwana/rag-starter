@@ -19,7 +19,7 @@ const marked = (controller: { prototype: object }, handler: string): boolean =>
  */
 const CLASSIFIED = [
   { controller: QueryController, costly: ['ask', 'stream'], cheap: [] },
-  { controller: DocumentsController, costly: ['create', 'upload', 'reindexAll', 'update', 'reindex'], cheap: ['list', 'get', 'remove'] },
+  { controller: DocumentsController, costly: ['create', 'upload', 'reindexAll', 'update', 'reindex'], cheap: ['list', 'listTags', 'get', 'remove'] },
   { controller: JobsController, costly: ['indexText', 'upload', 'reindexAll'], cheap: ['list', 'get'] },
 ];
 

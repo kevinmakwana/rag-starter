@@ -1,4 +1,5 @@
-import { IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
+import { MAX_TAG_LENGTH, MAX_TAGS } from './tags';
 
 export const MAX_DOCUMENT_CHARS = 500_000;
 /** Size limit for an uploaded file (a PDF or Word file is bigger than the text inside it). */
@@ -25,6 +26,14 @@ export class CreateDocumentDto {
   @IsString()
   @MaxLength(40)
   language?: string;
+
+  /** Labels for filtering questions; lower-cased, at most MAX_TAGS. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(MAX_TAGS)
+  @IsString({ each: true })
+  @MaxLength(MAX_TAG_LENGTH, { each: true })
+  tags?: string[];
 }
 
 export class UpdateDocumentDto {
@@ -45,6 +54,14 @@ export class UpdateDocumentDto {
   @IsString()
   @MaxLength(40)
   language?: string;
+
+  /** Replaces the document's labels ([] clears them); a tags-only update does not re-index. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(MAX_TAGS)
+  @IsString({ each: true })
+  @MaxLength(MAX_TAG_LENGTH, { each: true })
+  tags?: string[];
 }
 
 export interface DocumentSummary {
@@ -56,6 +73,8 @@ export interface DocumentSummary {
   createdAt: string;
   /** The text search configuration its keyword search uses (english, german, ...). */
   language: string;
+  /** Labels for filtering questions (lower-case, sorted). */
+  tags: string[];
   /** True when identical content was already indexed and the existing document is returned. */
   duplicate: boolean;
 }

@@ -17,6 +17,7 @@ import { CurrentUser } from '../auth/current-user.decorator';
 import { Costly } from '../rate-limit/costly.decorator';
 import { CreateDocumentDto, MAX_UPLOAD_BYTES } from '../documents/documents.dto';
 import { DocumentsService } from '../documents/documents.service';
+import { normalizeTags } from '../documents/tags';
 import { isSupportedFile, SUPPORTED_EXTENSIONS } from '../ingestion/extractors';
 import { JobsService, JobView } from './jobs.service';
 
@@ -48,7 +49,9 @@ export class JobsController {
   @Post('documents')
   @HttpCode(202)
   indexText(@Body() dto: CreateDocumentDto, @CurrentUser() owner: string): Promise<JobView> {
-    return this.jobs.enqueue('ingest_text', { title: dto.title.trim(), payload: { ...dto, language: this.documents.resolveLanguage(dto.language) }, owner });
+    // Validate and normalise now, so a bad value is a 400 here rather than a job that fails later.
+    const payload = { ...dto, language: this.documents.resolveLanguage(dto.language), tags: normalizeTags(dto.tags) };
+    return this.jobs.enqueue('ingest_text', { title: dto.title.trim(), payload, owner });
   }
 
   /** Index an uploaded file in the background; text extraction happens in the job too. */
@@ -59,6 +62,7 @@ export class JobsController {
   upload(
     @CurrentUser() owner: string,
     @Body('language') language: unknown,
+    @Body('tags') tags: unknown,
     @UploadedFile() file?: Express.Multer.File,
   ): Promise<JobView> {
     if (!file) throw new BadRequestException('Attach a file in the "file" field');
@@ -67,7 +71,11 @@ export class JobsController {
     }
     return this.jobs.enqueue('ingest_file', {
       title: file.originalname,
-      payload: { filename: file.originalname, language: this.documents.resolveLanguage(language) },
+      payload: {
+        filename: file.originalname,
+        language: this.documents.resolveLanguage(language),
+        tags: normalizeTags(tags),
+      },
       file: file.buffer,
       owner,
     });

@@ -62,7 +62,7 @@ describe('QueryService.retrieve in hybrid mode', () => {
   });
 
   /** The language lookup that comes before the full-text query: one document language, english. */
-  const isLanguageLookup = (sql: string) => /SELECT DISTINCT language/.test(sql);
+  const isLanguageLookup = (sql: string) => /SELECT DISTINCT d\.language/.test(sql);
 
   /** A db that answers the vector query and the full-text query from canned lists (best first, as ranked). */
   function fakeDb(vector: ReturnType<typeof row>[], lexical: ReturnType<typeof row>[]) {
